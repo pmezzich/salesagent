@@ -115,7 +115,19 @@ async def adcp_error_handler(request: Request, exc: AdCPError) -> JSONResponse:
     transport markers (``isError: true`` / ``failed``) are set by their
     own boundary translators. Wire codes are translated through
     ``ERROR_CODE_MAPPING`` inside the envelope builder.
+
+    Logs a breadcrumb on every translation so a 4xx response leaves an
+    observability trail — symmetric with the A2A boundary's
+    ``_handle_explicit_skill`` audit log. Previously REST returned JSON
+    silently with no logger or audit call.
     """
+    logger.warning(
+        "REST boundary translating %s to envelope: %s - %s (path=%s)",
+        type(exc).__name__,
+        exc.error_code,
+        exc.message,
+        request.url.path,
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content=build_two_layer_error_envelope(exc),

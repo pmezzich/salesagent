@@ -8,7 +8,7 @@ and applies version compat at the boundary.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from src.core.resolved_identity import ResolvedIdentity
@@ -65,7 +65,13 @@ def _handle_tool_error(e: ToolError) -> JSONResponse:
     synthetic = AdCPError(error_message)
     synthetic.error_code = error_code
     if recovery in ("transient", "correctable", "terminal"):
-        synthetic.recovery = recovery  # type: ignore[assignment]
+        # ``extract_error_info`` returns ``RecoveryHint | None``; the runtime
+        # ``in`` check above narrows the value to one of the three Literal
+        # members. Use ``cast`` to make the narrowing explicit at the type
+        # level rather than suppressing the mismatch with ``# type: ignore``.
+        from src.core.exceptions import RecoveryHint
+
+        synthetic.recovery = cast(RecoveryHint, recovery)
     return JSONResponse(status_code=500, content=build_two_layer_error_envelope(synthetic))
 
 
