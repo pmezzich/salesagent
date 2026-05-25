@@ -497,3 +497,136 @@ class TestA2AErrorResponseStructure:
             assert (
                 error.data["recovery"] == "transient"
             ), "Custom recovery='transient' override must be preserved, not default 'terminal'"
+
+
+@pytest.mark.integration
+@pytest.mark.requires_db
+@pytest.mark.asyncio
+class TestA2AWireEnvelopeForTypedSubclasses:
+    """Per-subclass wire-level proof that the A2A boundary translates each typed
+    AdCPError raised by an _impl into an A2A SDK error type carrying the
+    spec-compliant two-layer envelope.
+
+    Each test patches an authenticated skill handler so the raised typed error
+    flows through ``_handle_explicit_skill`` to ``_adcp_to_a2a_error`` — the
+    boundary translator that constructs the wire envelope. Without these tests,
+    the Pattern A drain (~45 production sites for these five subclasses) has
+    no end-to-end proof that the typed error reaches the wire with the correct
+    ``error_code`` / ``recovery`` / envelope shape.
+
+    Pattern mirrors ``test_adcp_error_carries_recovery_through_a2a_boundary``
+    and ``test_custom_recovery_override_preserved_through_a2a`` above.
+    """
+
+    @pytest.fixture
+    def handler(self):
+        return AdCPRequestHandler()
+
+    async def test_package_not_found_wire_envelope(self, integration_db, handler):
+        """AdCPPackageNotFoundError → A2A InternalError with PACKAGE_NOT_FOUND envelope."""
+        from unittest.mock import patch
+
+        from a2a.utils.errors import InternalError
+
+        from src.core.exceptions import AdCPPackageNotFoundError
+
+        async def mock_skill_raises(params, token):
+            raise AdCPPackageNotFoundError("Package pkg_missing not found")
+
+        with patch.object(handler, "_handle_get_products_skill", mock_skill_raises):
+            with pytest.raises(InternalError) as exc_info:
+                await handler._handle_explicit_skill("get_products", {}, "token")
+
+        err = exc_info.value
+        assert err.data is not None, "InternalError must carry envelope on .data"
+        assert err.data["adcp_error"]["code"] == "PACKAGE_NOT_FOUND"
+        assert err.data["errors"][0]["code"] == "PACKAGE_NOT_FOUND"
+        assert err.data["error_code"] == "PACKAGE_NOT_FOUND"
+
+    async def test_capability_not_supported_wire_envelope(self, integration_db, handler):
+        """AdCPCapabilityNotSupportedError → A2A InternalError with UNSUPPORTED_FEATURE envelope and correctable recovery."""
+        from unittest.mock import patch
+
+        from a2a.utils.errors import InternalError
+
+        from src.core.exceptions import AdCPCapabilityNotSupportedError
+
+        async def mock_skill_raises(params, token):
+            raise AdCPCapabilityNotSupportedError("Currency EUR not supported")
+
+        with patch.object(handler, "_handle_get_products_skill", mock_skill_raises):
+            with pytest.raises(InternalError) as exc_info:
+                await handler._handle_explicit_skill("get_products", {}, "token")
+
+        err = exc_info.value
+        assert err.data is not None
+        assert err.data["adcp_error"]["code"] == "UNSUPPORTED_FEATURE"
+        assert err.data["errors"][0]["code"] == "UNSUPPORTED_FEATURE"
+        assert err.data["error_code"] == "UNSUPPORTED_FEATURE"
+        assert err.data["recovery"] == "correctable"
+
+    async def test_budget_exceeded_wire_envelope(self, integration_db, handler):
+        """AdCPBudgetExceededError → A2A InternalError with BUDGET_EXCEEDED envelope and correctable recovery."""
+        from unittest.mock import patch
+
+        from a2a.utils.errors import InternalError
+
+        from src.core.exceptions import AdCPBudgetExceededError
+
+        async def mock_skill_raises(params, token):
+            raise AdCPBudgetExceededError("Budget 9999999 exceeds product max")
+
+        with patch.object(handler, "_handle_get_products_skill", mock_skill_raises):
+            with pytest.raises(InternalError) as exc_info:
+                await handler._handle_explicit_skill("get_products", {}, "token")
+
+        err = exc_info.value
+        assert err.data is not None
+        assert err.data["adcp_error"]["code"] == "BUDGET_EXCEEDED"
+        assert err.data["errors"][0]["code"] == "BUDGET_EXCEEDED"
+        assert err.data["error_code"] == "BUDGET_EXCEEDED"
+        assert err.data["recovery"] == "correctable"
+
+    async def test_product_unavailable_wire_envelope(self, integration_db, handler):
+        """AdCPProductUnavailableError → A2A InternalError with PRODUCT_UNAVAILABLE envelope and correctable recovery."""
+        from unittest.mock import patch
+
+        from a2a.utils.errors import InternalError
+
+        from src.core.exceptions import AdCPProductUnavailableError
+
+        async def mock_skill_raises(params, token):
+            raise AdCPProductUnavailableError("Product prod_offline is not available")
+
+        with patch.object(handler, "_handle_get_products_skill", mock_skill_raises):
+            with pytest.raises(InternalError) as exc_info:
+                await handler._handle_explicit_skill("get_products", {}, "token")
+
+        err = exc_info.value
+        assert err.data is not None
+        assert err.data["adcp_error"]["code"] == "PRODUCT_UNAVAILABLE"
+        assert err.data["errors"][0]["code"] == "PRODUCT_UNAVAILABLE"
+        assert err.data["error_code"] == "PRODUCT_UNAVAILABLE"
+        assert err.data["recovery"] == "correctable"
+
+    async def test_service_unavailable_wire_envelope(self, integration_db, handler):
+        """AdCPServiceUnavailableError → A2A InternalError with SERVICE_UNAVAILABLE envelope and transient recovery."""
+        from unittest.mock import patch
+
+        from a2a.utils.errors import InternalError
+
+        from src.core.exceptions import AdCPServiceUnavailableError
+
+        async def mock_skill_raises(params, token):
+            raise AdCPServiceUnavailableError("Adapter timed out")
+
+        with patch.object(handler, "_handle_get_products_skill", mock_skill_raises):
+            with pytest.raises(InternalError) as exc_info:
+                await handler._handle_explicit_skill("get_products", {}, "token")
+
+        err = exc_info.value
+        assert err.data is not None
+        assert err.data["adcp_error"]["code"] == "SERVICE_UNAVAILABLE"
+        assert err.data["errors"][0]["code"] == "SERVICE_UNAVAILABLE"
+        assert err.data["error_code"] == "SERVICE_UNAVAILABLE"
+        assert err.data["recovery"] == "transient"
