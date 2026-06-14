@@ -3,6 +3,25 @@
 Recurring patterns extracted from code review history. Follow these when
 writing or modifying code.
 
+## No Allowlist Growth — Hard Block
+
+Structural-guard allowlists in this repo are ratchets: they only shrink.
+A PR that adds a new entry to any allowlist — `model_dump`, weak-mock
+assertions, raw `select`, the `type-ignore` baseline, the duplication
+baseline — is a blocker, not a nit. Existing entries are debt, not a
+template for new code.
+
+Pre-commit and the structural-guard tests both enforce this. Never accept
+a "match the existing convention" rationale when the convention is itself
+allowlisted — fix the new code to the rule, don't widen the ratchet.
+
+```text
+# WRONG — new code added to the type-ignore baseline to make CI pass
+.type-ignore-baseline: 60 -> 61
+
+# CORRECT — fix the new violation; the baseline only ever decreases
+```
+
 ## Hoisting — No Inline Imports Without Justification
 
 Move imports to module level unless a sanctioned exception applies:
@@ -97,17 +116,32 @@ errors=[{"code": "FOO", "message": "bar"}]
 errors=[Error(code="FOO", message="bar")]
 ```
 
-Also: both sides of a comparison must use the same representation.
-DB-hydrated Pydantic models vs serialized dicts will always be `!=`.
-Use `.model_dump(mode="json")` on both sides, or compare model-to-model.
+## Comparisons — Same Representation on Both Sides
+
+Both sides of an `==` / `!=` comparison must use the same representation.
+A DB-hydrated Pydantic model compared to a serialized dict is always
+unequal, so the assertion silently never fails. (This is easy to miss
+when buried in test setup — see also Test Review Patterns § Always-True
+Inequality.)
+
+```python
+# WRONG — model vs dict is always != → assertion can never fail
+assert response != {"status": "active"}
+
+# CORRECT — normalize both sides, or compare model-to-model
+assert response.model_dump(mode="json") == {"status": "active"}
+assert response == ExpectedModel(status="active")
+```
 
 ## Dead / Unreachable Code
 
 Remove code that can never execute:
 
-1. **Unreachable exception branch**: `except SomeError` where `SomeError`
-   cannot be raised by anything in the `try` block. Common: catching
-   `ToolError` around TypeAdapter calls (which raise `ValidationError`).
+1. **Unreachable exception branch**: only catch exception types the `try`
+   block can actually raise — read what the called code emits. Catching a
+   type nothing in the block raises is dead code, and often masks the real
+   error type. Example: catching `ToolError` around a TypeAdapter call,
+   which raises `pydantic.ValidationError`, never `ToolError`.
 
 2. **No-op transformation**: `json.loads(json.dumps(x))` where `x` is
    already plain JSON types — the round-trip changes nothing.
@@ -133,6 +167,9 @@ Watch for `get_adapter()` and similar factory methods where a called
 helper re-queries what the caller already loaded.
 
 ## `_impl` Functions — Raise Typed Exceptions, Don't Build Wire Shape
+
+> Reinforces CLAUDE.md Critical Pattern #5 (Transport Boundary: Layer
+> Separation) with concrete examples.
 
 `_impl` functions raise typed `AdCPError` subclasses. Boundary translators
 build the wire envelope via `build_two_layer_error_envelope()`.

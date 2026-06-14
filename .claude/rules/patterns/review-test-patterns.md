@@ -93,6 +93,9 @@ assert "field" in response
 
 ## Error Tests — Assert on Wire Envelope, Not Reconstructed Exceptions
 
+> See `tests/CLAUDE.md` § Error Verification Policy for the full policy,
+> helpers, and migration path.
+
 The test harness reconstructs `AdCPError` from wire responses, but this
 reconstruction is lossy. Assert on the wire envelope as the primary authority.
 
@@ -115,3 +118,66 @@ Always verify the `recovery` field (`transient`, `correctable`, `terminal`)
 
 **Exception:** `_impl`-level unit tests (no wire involved) may use
 `isinstance()` and `.error_code` since they test the raise site directly.
+
+## Tests Must Fail When Production Is Mutated
+
+A test that survives the production line being deleted or inverted is not
+coverage. Before approving a test: read the assertion, mentally delete or
+invert the line under test, then ask whether the assertion would fire.
+
+Common failure modes:
+
+- **Mock that bypasses the predicate under test.** A `scalars(...).all()`
+  stubbed to a static list means the tenant-scoping `WHERE` can be reverted
+  with no test failure.
+- **`patch()` of the function under test that only ever raises.** Patching
+  `_finalize_approval` to raise means the real function's branches are
+  never exercised.
+- **Assertion on a value the test built itself**, rather than on the real
+  call site's output.
+
+```python
+# WRONG — stubbed query can't catch a scoping regression
+mock_session.scalars.return_value.all.return_value = [row1, row2]
+# delete the tenant_id filter in production → this test still passes
+
+# CORRECT — drive the real query against a seeded DB (requires_db)
+result = repo.get_by_tenant(tenant_id)
+assert {r.id for r in result} == {row1.id}  # row2 belongs to another tenant
+```
+
+## Done Means Harness/Integration Coverage, Not Manual-Mock Units
+
+A fix isn't done until an integration test (`@pytest.mark.requires_db`) or
+an e2e/BDD test built on `tests/harness/` + `tests/factories/`:
+
+1. drives the real entrypoint,
+2. exercises the code path the fix touches, and
+3. fails when the fix is reverted.
+
+Manual `patch()` / `MagicMock` stacks let wire-correctness, JSONB
+`flag_modified`, transaction ordering, and race conditions slip through —
+they test the mock, not the system.
+
+## No `pytest.mark.skip` / `xfail` to Bypass a Failure
+
+> Project policy: CLAUDE.md "Test Integrity Policy".
+
+The only acceptable `xfail` is a tracked stub for unimplemented work,
+managed by the test-surfacing skill (`/surface`). Never `xfail` to mute a
+real regression, an "infrastructure issue," or a "pre-existing failure."
+Fix the code or the test; if you're blocked, report it — don't skip it.
+
+## Verify a "Production Gap" xfail Against the Spec Before Implementing
+
+An `xfail` labeled "production gap" is a claim, not a fact. Before
+recommending that someone implement the behavior, verify the expectation
+against the AdCP `error_code` enum and the source-of-truth hierarchy:
+
+- Generated `BR-*.feature` files trace to the upstream AdCP requirements
+  repo — that is authoritative.
+- `docs/test-obligations/` is bootstrap scaffolding only, **not**
+  authoritative.
+
+Otherwise a wiring PR gets asked to implement non-spec behavior to satisfy
+a test that was wrong to begin with.
