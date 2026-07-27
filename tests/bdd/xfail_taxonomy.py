@@ -75,6 +75,16 @@ def no_harness_wired(uc: object) -> str:
     return f"{NO_HARNESS_WIRED} {uc}"
 
 
+def not_yet_wired(subject: str, detail: str) -> str:
+    """Reason for a per-UC ``_harness_env`` "not yet wired" branch.
+
+    Owns the whole ``"<subject> harness <marker> <detail>"`` template — the
+    literal ``" harness "`` glue and the subject/marker/detail order — so the
+    per-UC sites that used to hand-assemble it cannot drift from one another.
+    """
+    return f"{subject} harness {NOT_YET_WIRED} {detail}"
+
+
 # ── Classification vocabulary ────────────────────────────────────────────────
 
 #: Lowercased substrings that mean "dormant because nothing wires it", as

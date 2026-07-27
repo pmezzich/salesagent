@@ -26,15 +26,36 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 from tests.bdd import xfail_taxonomy as xt
 
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check_dormant_scenarios.py"
-_spec = importlib.util.spec_from_file_location("check_dormant_scenarios", _SCRIPT)
-cds = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cds)
+#: The single owner of where the sibling scripts live — recomputed at three
+#: sites before, mirroring the ``_CONFTEST`` path-constant pattern below.
+_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
+
+
+def _load_script(filename: str) -> ModuleType:
+    """Import a ``scripts/`` module from its file path.
+
+    The single owner of *how* these path-loaded scripts import — the
+    ``spec_from_file_location`` -> ``module_from_spec`` -> ``exec_module``
+    sequence was repeated verbatim at two sites, each ignoring the
+    ``spec``/``loader is None`` case. A change to the load (a ``sys.path``
+    insert, this guard) now lands once.
+    """
+    path = _SCRIPTS_DIR / filename
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+cds = _load_script("check_dormant_scenarios.py")
 
 #: The one file whose emitted xfail reasons the two AST guards below grade.
 _CONFTEST = Path(__file__).resolve().parents[1] / "bdd" / "conftest.py"
@@ -433,15 +454,12 @@ class TestSharedTaxonomy:
         assert cds.scenario_name is xt.scenario_name
 
     def test_enumerate_bdd_issues_uses_the_shared_collapse(self):
-        script = Path(__file__).resolve().parents[2] / "scripts" / "enumerate_bdd_issues.py"
-        spec = importlib.util.spec_from_file_location("enumerate_bdd_issues", script)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = _load_script("enumerate_bdd_issues.py")
         assert mod.scenario_name is xt.scenario_name
 
     @pytest.mark.parametrize("script", ["check_dormant_scenarios.py", "enumerate_bdd_issues.py"])
     def test_no_script_reimplements_the_collapse_inline(self, script):
-        path = Path(__file__).resolve().parents[2] / "scripts" / script
+        path = _SCRIPTS_DIR / script
         hits = self._INLINE_COLLAPSE.findall(path.read_text(encoding="utf-8"))
         assert hits == [], (
             f"scripts/{script} re-implements the nodeid->scenario collapse inline; "

@@ -3273,9 +3273,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 ctx["default_pricing_option"] = pricing_option
                 yield
         elif "T-UC-002-inv-015-6" in marker_names:
-            pytest.xfail(
-                f"T-UC-002-inv-015-6 create_media_buy harness {xfail_taxonomy.NOT_YET_WIRED} (tracked in #1652)"
-            )
+            pytest.xfail(xfail_taxonomy.not_yet_wired("T-UC-002-inv-015-6 create_media_buy", "(tracked in #1652)"))
         else:
             # Restore the xfail guard every other use case keeps on its catch-all:
             # non-account / non-extension UC-002 scenarios are NOT yet wired (no
@@ -3283,7 +3281,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
             # "Account reference is required"). Mirror UC-003/004/006/011: xfail them
             # until each is explicitly wired into a run branch above. Dropping this
             # line is what flipped ~800 dormant scenarios from xfail to fail.
-            pytest.xfail(f"UC-002 harness {xfail_taxonomy.NOT_YET_WIRED} for non-extension scenarios")
+            pytest.xfail(xfail_taxonomy.not_yet_wired("UC-002", "for non-extension scenarios"))
 
     elif uc == "UC-003":
         marker_names = {m.name for m in request.node.iter_markers()}
@@ -3360,8 +3358,9 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 yield
         else:
             pytest.xfail(
-                f"UC-003 harness {xfail_taxonomy.NOT_YET_WIRED} for non-extension scenarios "
-                "(full graduation pending, PR #1567 follow-up)"
+                xfail_taxonomy.not_yet_wired(
+                    "UC-003", "for non-extension scenarios (full graduation pending, PR #1567 follow-up)"
+                )
             )
 
     elif uc == "UC-006":
@@ -3380,7 +3379,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 ctx["env"] = env
                 yield
         else:
-            pytest.xfail(f"UC-006 harness {xfail_taxonomy.NOT_YET_WIRED} for non-account scenarios")
+            pytest.xfail(xfail_taxonomy.not_yet_wired("UC-006", "for non-account scenarios"))
 
     elif uc == "UC-005":
         from tests.harness.creative_formats import CreativeFormatsEnv
@@ -3418,13 +3417,14 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 ctx["env"] = env
                 yield
         elif "T-UC-018-ext-c" in marker_names:
-            pytest.xfail(
-                f"T-UC-018-ext-c list_creatives validation harness {xfail_taxonomy.NOT_YET_WIRED} (tracked in #1652)"
-            )
+            pytest.xfail(xfail_taxonomy.not_yet_wired("T-UC-018-ext-c list_creatives validation", "(tracked in #1652)"))
         else:
             pytest.xfail(
-                f"UC-018 harness {xfail_taxonomy.NOT_YET_WIRED} outside the @list-after-sync (#1405), "
-                "@concept-id (#1407), and @BR-RULE-034 isolation (#1503) scenarios"
+                xfail_taxonomy.not_yet_wired(
+                    "UC-018",
+                    "outside the @list-after-sync (#1405), @concept-id (#1407), "
+                    "and @BR-RULE-034 isolation (#1503) scenarios",
+                )
             )
 
     elif uc == "UC-011":
@@ -3444,7 +3444,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 ctx["env"] = env
                 yield
         else:
-            pytest.xfail(f"UC-011 harness {xfail_taxonomy.NOT_YET_WIRED} for markers: {marker_names}")
+            pytest.xfail(xfail_taxonomy.not_yet_wired("UC-011", f"for markers: {marker_names}"))
 
     elif uc == "ADMIN":
         request.getfixturevalue("integration_db")
@@ -3511,7 +3511,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 ctx["default_pricing_option"] = pricing_option
                 yield
         else:
-            pytest.xfail(f"UC-004 harness {xfail_taxonomy.NOT_YET_WIRED} for type: {harness_type}")
+            pytest.xfail(xfail_taxonomy.not_yet_wired("UC-004", f"for type: {harness_type}"))
     elif uc == "UC-GET-PRODUCTS":
         from tests.harness.product import ProductEnv
 
