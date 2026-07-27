@@ -302,6 +302,25 @@ def _unwrap_a2a_server_error(exc: Exception) -> Exception:
     return exc
 
 
+def _discard_invalid_auth_hint(kwargs: dict[str, Any]) -> None:
+    """Drop the transport-blind ``_invalid_auth`` hint on the A2A and MCP legs.
+
+    The BDD invalid-token scenario forwards the bad token uniformly as
+    ``_invalid_auth`` (``_dispatch_full_create``) so no step carries
+    transport-specific knowledge. A2A and MCP need no special realization: the
+    bad token already rides the dispatched identity's ``auth_token`` and the real
+    auth chain (header → token → DB lookup → ``ResolvedIdentity``) runs against
+    it, so both simply discard the hint. REST is the only transport that realizes
+    it specially — the in-process leg routes the bad token through the real
+    auth dep as headers (``_run_rest_request``) because its dep override would
+    otherwise inject a resolved identity and skip the raise, and the e2e leg
+    CONSUMES the hint into real headers (``RestE2EDispatcher``, not this discard)
+    because the identity's tenant dict carries only the derived ``pub-<uuid>``
+    subdomain, not the bare host-routed tenant id under test.
+    """
+    kwargs.pop("_invalid_auth", None)
+
+
 class _TestClock:
     """Minimal clock for BDD relative date-token resolution.
 
@@ -631,13 +650,11 @@ class BaseTestEnv:
 
         self._commit_factory_data()
 
-        # A2A's realization of the transport-blind invalid-token contract: the
-        # bad token already rides the dispatched identity's auth_token (the real
-        # auth chain below runs against it), so the uniformly-forwarded
-        # ``_invalid_auth`` hint is discarded — only REST needs the header route
-        # (``_run_rest_request``), because its dep override would otherwise
-        # inject a resolved identity and skip the raise.
-        kwargs.pop("_invalid_auth", None)
+        # A2A realizes the transport-blind invalid-token contract by running the
+        # real auth chain against the dispatched identity's bad token, so the
+        # uniformly-forwarded ``_invalid_auth`` hint is discarded here (shared with
+        # the MCP leg; see ``_discard_invalid_auth_hint`` for the full rationale).
+        _discard_invalid_auth_hint(kwargs)
 
         # Pop identity — used for the handler mock, not sent as a skill parameter.
         _NO_OVERRIDE = object()
@@ -795,12 +812,11 @@ class BaseTestEnv:
 
         self._commit_factory_data()
 
-        # MCP's realization of the transport-blind invalid-token contract: the
-        # bad token already rides the dispatched identity's auth_token (the real
-        # header→token→DB chain below runs against it), so the uniformly-forwarded
-        # ``_invalid_auth`` hint is discarded — see ``_run_a2a_handler`` /
-        # ``_run_rest_request`` for the sibling realizations.
-        kwargs.pop("_invalid_auth", None)
+        # MCP realizes the transport-blind invalid-token contract by running the
+        # real header→token→DB chain against the dispatched identity's bad token, so
+        # the uniformly-forwarded ``_invalid_auth`` hint is discarded here (shared
+        # with the A2A leg; see ``_discard_invalid_auth_hint`` for the full rationale).
+        _discard_invalid_auth_hint(kwargs)
 
         # Pop identity — used for the auth mock, not sent as a tool argument.
         _NO_OVERRIDE = object()

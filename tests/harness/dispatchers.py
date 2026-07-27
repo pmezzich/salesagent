@@ -148,7 +148,7 @@ class A2ADispatcher:
             return TransportResult(
                 error=exc,
                 wire_error_envelope=_wire_envelope_from_exception(exc),
-                wire_error_envelope_synthesized=_a2a_wire_envelope_was_synthesized(exc),
+                wire_error_envelope_is_synthesized=_a2a_wire_envelope_was_synthesized(exc),
             )
         # Real A2A wire: the artifact DataPart dict stashed by _run_a2a_handler
         # (declared on BaseTestEnv, reset per call_via — read directly so a
@@ -270,14 +270,19 @@ class RestE2EDispatcher:
             return TransportResult(error=RuntimeError("E2E dispatch requires env.e2e_config (pass e2e_config= to env)"))
 
         identity = kwargs.pop("identity", None)
-        # E2E REST's realization of the transport-blind invalid-token contract:
-        # the identity's (bad) auth_token is sent as a REAL x-adcp-auth header
-        # below and the live server runs the real auth chain against it, so the
-        # uniformly-forwarded ``_invalid_auth`` hint is discarded — only the
-        # in-process REST leg needs the special header route, because its dep
-        # override would otherwise inject a resolved identity and skip the raise
-        # (``_run_rest_request``).
-        kwargs.pop("_invalid_auth", None)
+        # E2E REST's realization of the transport-blind invalid-token contract,
+        # mirroring the in-process REST leg (``_run_rest_request``): CONSUME the
+        # ``_invalid_auth`` hint — do not discard it — and send the bad token plus
+        # the bare host-routed tenant id as headers, DROPPING the injected identity.
+        # The identity's tenant dict carries only the derived ``pub-<uuid>``
+        # subdomain, not the bare UUID under test; sending that instead resolves no
+        # tenant on the live server, so ``reject_invalid_token`` runs with ``None``,
+        # the message reads "...for tenant 'any'...", and the non-disclosure check
+        # passes whether or not the redaction holds — a false floor. Sending the bare
+        # UUID as ``x-adcp-tenant`` makes ``resolve_identity``'s direct-tenant-id
+        # fallback detect it, so the leg reaches the raise with the real id and
+        # reddens on a revert.
+        invalid_auth = kwargs.pop("_invalid_auth", None)
         base_url = env.e2e_config.base_url
 
         # identity=None means "send without auth headers" (no-auth test) — let the
@@ -285,7 +290,10 @@ class RestE2EDispatcher:
         # but auth_token is None (principal_id=None boundary tests), omit the header
         # so the server rejects gracefully instead of httpx raising on a None header.
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if identity is not None:
+        if invalid_auth is not None:
+            headers["x-adcp-auth"] = invalid_auth["token"]
+            headers["x-adcp-tenant"] = invalid_auth["tenant"]
+        elif identity is not None:
             if identity.auth_token is not None:
                 headers["x-adcp-auth"] = identity.auth_token
             tenant = getattr(identity, "tenant", None)

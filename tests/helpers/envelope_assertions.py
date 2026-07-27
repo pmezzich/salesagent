@@ -81,13 +81,25 @@ def assert_no_tenant_disclosure(target: Any, tenant_id: str) -> None:
         )
 
 
-def _flatten_envelope(envelope: dict, prefix: str = "") -> list[tuple[str, Any]]:
-    """Yield (dotted-path, value) leaf pairs so a leak names its own field."""
+def _flatten_envelope(envelope: dict[str, Any], prefix: str = "") -> list[tuple[str, Any]]:
+    """Yield (dotted-path, value) leaf pairs so a leak names its own field.
+
+    Recurses into both dicts and lists/tuples: ``build_two_layer_error_envelope``
+    keeps the per-error fields (``message``/``details``/``suggestion``/``field``)
+    inside ``errors[]``, a list — the likeliest place a tenant id leaks — so a leak
+    there must report ``errors[0].details`` rather than the coarse ``errors``.
+    """
     pairs: list[tuple[str, Any]] = []
     for key, value in envelope.items():
         path = f"{prefix}{key}"
         if isinstance(value, dict):
             pairs.extend(_flatten_envelope(value, prefix=f"{path}."))
+        elif isinstance(value, (list, tuple)):
+            for i, item in enumerate(value):
+                if isinstance(item, dict):
+                    pairs.extend(_flatten_envelope(item, prefix=f"{path}[{i}]."))
+                else:
+                    pairs.append((f"{path}[{i}]", item))
         else:
             pairs.append((path, value))
     return pairs

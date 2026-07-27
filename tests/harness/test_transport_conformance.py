@@ -70,7 +70,7 @@ class TestAssertWireErrorRequiresRealWire:
         return TransportResult(
             error=RuntimeError("rejected"),
             wire_error_envelope=self.ENVELOPE,
-            wire_error_envelope_synthesized=synthesized,
+            wire_error_envelope_is_synthesized=synthesized,
         )
 
     def test_real_wire_envelope_passes(self):
@@ -138,7 +138,7 @@ class TestA2ADispatcherDerivesSynthesizedFlag:
         assert result.wire_error_envelope is not None, (
             "The fallback rebuild is expected here — that masquerade is exactly what the flag exposes"
         )
-        assert result.wire_error_envelope_synthesized is True
+        assert result.wire_error_envelope_is_synthesized is True
         with pytest.raises(AssertionError, match="rebuilt from the reconstructed"):
             result.assert_wire_error("AUTH_REQUIRED", require_real_wire=True)
 
@@ -158,5 +158,5 @@ class TestA2ADispatcherDerivesSynthesizedFlag:
         )
 
         assert result.is_error
-        assert result.wire_error_envelope_synthesized is False
+        assert result.wire_error_envelope_is_synthesized is False
         result.assert_wire_error("AUTH_REQUIRED", require_suggestion=True, require_real_wire=True)

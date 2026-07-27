@@ -174,10 +174,11 @@ class TestResolveIdentity:
 
         FAST GUARD, not the wire pin. This mocks the tenant/principal lookups and
         grades the raised exception in-process; non-disclosure is a contract about
-        what the BUYER receives, and that is pinned on the real A2A wire by
-        test_auth_suggestion_parity.py::TestInvalidTokenA2ANoDisclosure (which
-        asserts through ``assert_wire_error(..., require_real_wire=True)`` so a
-        rebuilt envelope cannot stand in for the wire). This test stays because it
+        what the BUYER receives, and that is pinned on the real wire by the
+        collapsed @T-UC-002-invalid-token-no-disclosure BDD scenario, swept across
+        a2a/mcp/rest (+e2e_rest) and asserting through
+        ``assert_wire_error(..., require_real_wire=True)`` on the A2A leg so a
+        rebuilt envelope cannot stand in for the wire. This test stays because it
         is the only one that can assert the compensating log line cheaply."""
         import logging
 
