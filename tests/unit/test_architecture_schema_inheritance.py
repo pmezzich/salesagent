@@ -265,14 +265,12 @@ class TestSchemaInheritance:
             # we redeclare required to match the spec.
             ("GetProductsResponse", "products"),
             # --- Surfaced by the MRO re-key (#1618), triaged against adcp 6.6 ---
-            # adcp 6.6 (spec 3.1.1) made status/confirmed_at/revision required on the
-            # create success envelope (CreateMediaBuyResponse1 declares all three
-            # required with no default). They are invariant for a synchronous committed
-            # success, so the subclass declares spec-correct defaults instead of
-            # threading identical literals through every constructor
-            # (src/core/schemas/_base.py, CreateMediaBuySuccess). Because the parent
-            # fields are required-with-no-default, these can never migrate to plain
-            # inheritance.
+            # status/confirmed_at/revision are required-with-no-default on the adcp 6.6
+            # parent (CreateMediaBuyResponse1), so these can never migrate to plain
+            # inheritance. See the CreateMediaBuySuccess field declarations in
+            # src/core/schemas/_base.py for the full rationale (why the subclass declares
+            # spec-correct defaults). Kept as a pointer, not a restatement, so the
+            # argument lives in exactly one place.
             ("CreateMediaBuySuccess", "confirmed_at"),
             ("CreateMediaBuySuccess", "revision"),
             ("CreateMediaBuySuccess", "status"),
