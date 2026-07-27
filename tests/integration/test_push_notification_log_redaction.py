@@ -45,6 +45,21 @@ _SECRET = "buyer-webhook-bearer-SECRET-should-never-be-logged"
 _SHORT_SECRET = "short-wire-SECRET"
 
 
+def _wire_pnc(*, id: str, credentials: str) -> dict:
+    """One credential-bearing copy of the AdCP wire push-notification-config shape.
+
+    The three log-site tests differ only in ``id`` and the credential; the fixed
+    ``url`` and the nested ``authentication.schemes=["Bearer"]`` scaffold live here
+    so a wire-shape change is one edit, not three that can drift apart — the very
+    regression this suite guards. Mirrors the unit side's ``_wire_cfg``.
+    """
+    return {
+        "id": id,
+        "url": "https://buyer.example/webhook",
+        "authentication": {"schemes": ["Bearer"], "credentials": credentials},
+    }
+
+
 def _rendered(calls) -> str:
     """Render logger calls (message template + args + kwargs) into one string."""
     return "\n".join(str(call.args) + str(call.kwargs) for call in calls)
@@ -118,11 +133,7 @@ def test_create_media_buy_registration_log_redacts_webhook_credential(integratio
     ``_SECRET`` here (this site receives the A2A wire dict, which has no masking
     repr, so both assertions bite).
     """
-    pnc = {
-        "id": "pnc_redact",
-        "url": "https://buyer.example/webhook",
-        "authentication": {"schemes": ["Bearer"], "credentials": _SECRET},
-    }
+    pnc = _wire_pnc(id="pnc_redact", credentials=_SECRET)
     result, mock_logger = _run_create_media_buy_with_pnc(pnc)
 
     assert isinstance(result.response, CreateMediaBuySuccess)
@@ -147,11 +158,7 @@ def test_create_media_buy_survives_sdk_rejected_credential_and_withholds_it(inte
     from adcp import PushNotificationConfig
     from pydantic import ValidationError
 
-    pnc = {
-        "id": "pnc_short",
-        "url": "https://buyer.example/webhook",
-        "authentication": {"schemes": ["Bearer"], "credentials": _SHORT_SECRET},
-    }
+    pnc = _wire_pnc(id="pnc_short", credentials=_SHORT_SECRET)
     # Premise guard: the fallback only runs if the SDK actually rejects this
     # credential. If a future SDK bump relaxes the >=32-char floor, fail loudly
     # here instead of silently degrading into a duplicate of the sibling test.
@@ -166,11 +173,14 @@ def test_create_media_buy_survives_sdk_rejected_credential_and_withholds_it(inte
     assert _SHORT_SECRET not in _rendered(mock_logger.info.call_args_list), (
         "buyer webhook credential leaked on the ValidationError fallback path (#1617)"
     )
-    # (3) The registration log line still ran, carrying the fallback's empty view.
+    # (3) The registration log line still ran, carrying the fallback's all-None view
+    # (redact_push_notification_config(None) — the closed record with every field
+    # None, which is what the fallback passes when model_validate rejected the wire).
     pnc_calls = _pnc_info_calls(mock_logger)
     assert pnc_calls, "no push-notification-config log call was emitted — the fallback assertions are vacuous"
-    assert any(len(call.args) > 1 and call.args[1] == {} for call in pnc_calls), (
-        "the fallback did not log the empty redacted view"
+    _all_none_view = {"id": None, "url": None, "authentication_type": None, "authentication": None}
+    assert any(len(call.args) > 1 and call.args[1] == _all_none_view for call in pnc_calls), (
+        "the fallback did not log the all-None redacted view"
     )
 
 
@@ -215,11 +225,7 @@ def reviewed_creative_with_webhook_step(integration_db):
             tool_name="sync_creatives",
             request_data={
                 "protocol": "mcp",
-                "push_notification_config": {
-                    "id": "pnc_cr",
-                    "url": "https://buyer.example/webhook",
-                    "authentication": {"schemes": ["Bearer"], "credentials": _SECRET},
-                },
+                "push_notification_config": _wire_pnc(id="pnc_cr", credentials=_SECRET),
             },
             object_mappings=[
                 {"object_type": "creative", "object_id": creative.creative_id, "action": "approve"},

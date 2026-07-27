@@ -91,8 +91,16 @@ class TestRedactPushNotificationConfig:
         out = redact_push_notification_config(_db_cfg(authentication_type=None, authentication_token=None))
         assert out["authentication"] is None
 
-    def test_none_returns_empty(self) -> None:
-        assert redact_push_notification_config(None) == {}
+    def test_none_returns_all_none_record(self) -> None:
+        """None reconciles to the closed record with every field None — not a
+        distinct empty ``{}`` — so the return type is one shape regardless of input.
+        """
+        assert redact_push_notification_config(None) == {
+            "id": None,
+            "url": None,
+            "authentication_type": None,
+            "authentication": None,
+        }
 
     def test_never_emits_the_secret_for_any_typed_shape(self) -> None:
         """Belt-and-suspenders: the secret string must not survive redaction.

@@ -8,13 +8,14 @@ logging-hygiene backlog).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     # Typing-only so log_safety imports nothing at runtime (no import cycle). The
     # helper accepts either the SDK wire model or the stored DB model; the two
     # share a name, so alias them here.
     from adcp import PushNotificationConfig as WirePushNotificationConfig
+    from pydantic import AnyUrl
 
     from src.core.database.models import PushNotificationConfig as DBPushNotificationConfig
 
@@ -32,9 +33,28 @@ if TYPE_CHECKING:
 REDACTED = "***REDACTED***"
 
 
+class RedactedPushNotificationConfig(TypedDict):
+    """The closed, credential-free view logged for a push-notification config.
+
+    A fixed four-key record, not the open ``dict[str, Any]`` this helper used to
+    return: ``id`` / ``url`` / ``authentication_type`` are the config's
+    non-sensitive fields, and ``authentication`` is the ``REDACTED`` sentinel when
+    a credential is present, ``None`` when it is not — never the secret itself.
+    The ``None`` input reconciles to an all-``None`` instance of this same record,
+    so every return path is one shape a reader (and ``%s``) can rely on. ``url``
+    is typed for both inputs: the DB model stores a ``str``, the SDK model an
+    ``AnyUrl`` (rendered by ``%s``).
+    """
+
+    id: str | None
+    url: str | AnyUrl | None
+    authentication_type: str | None
+    authentication: str | None
+
+
 def redact_push_notification_config(
     config: WirePushNotificationConfig | DBPushNotificationConfig | None,
-) -> dict[str, Any]:
+) -> RedactedPushNotificationConfig:
     """Return a loggable view of a push-notification config, credential removed.
 
     Takes a typed config model, not the wire dict: this is business logic, not a
@@ -46,7 +66,8 @@ def redact_push_notification_config(
     ``PushNotificationConfig`` under the flat ``authentication_token``. Logging
     the raw model leaks a replayable secret, so this keeps only non-sensitive
     fields (id, url, auth type) and masks the credential when one is present.
-    ``None`` returns ``{}``.
+    ``None`` returns an all-``None`` instance of this record (same four keys), so
+    the two return shapes reconcile.
 
     Every field is read by attribute (``getattr`` with a default, because the two
     typed shapes have disjoint field sets — the SDK model has no ``id`` /
@@ -58,7 +79,7 @@ def redact_push_notification_config(
     ``logger.info("registering pnc: %s", redact_push_notification_config(cfg))``.
     """
     if config is None:
-        return {}
+        return RedactedPushNotificationConfig(id=None, url=None, authentication_type=None, authentication=None)
 
     # SDK wire model: config.authentication.{schemes: [...], credentials: "<secret>"}.
     auth = getattr(config, "authentication", None)
@@ -72,9 +93,9 @@ def redact_push_notification_config(
     auth_type = getattr(scheme, "value", scheme) or getattr(config, "authentication_type", None)
     has_credential = bool(wire_credential) or bool(getattr(config, "authentication_token", None))
 
-    return {
-        "id": getattr(config, "id", None),
-        "url": getattr(config, "url", None),
-        "authentication_type": auth_type,
-        "authentication": REDACTED if has_credential else None,
-    }
+    return RedactedPushNotificationConfig(
+        id=getattr(config, "id", None),
+        url=getattr(config, "url", None),
+        authentication_type=auth_type,
+        authentication=REDACTED if has_credential else None,
+    )
