@@ -11,8 +11,11 @@ adapter's declared pricing surface without touching adapter resolution itself.
 Transport coverage: A2A (``get_adcp_capabilities`` skill), MCP
 (``get_adcp_capabilities`` tool), and REST. The REST route is
 ``GET /api/v1/capabilities`` — the only harness endpoint that is not a POST —
-so this env overrides ``_run_rest_request`` to issue a bodyless GET and declares
-``REST_METHOD`` for the e2e dispatcher (precedent: ``media_buy_dual.py``).
+so this env derives the verb from the request: the parameterless discovery call
+GETs, a request carrying a body POSTs it. ``build_rest_body`` records whether a
+body was built and the ``REST_METHOD`` property reads that flag, so the
+in-process and e2e dispatchers share one source of truth for the verb (precedent:
+the ``REST_METHOD``/``REST_ENDPOINT`` properties on ``media_buy_dual.py``).
 
 Usage::
 
@@ -38,9 +41,11 @@ class CapabilitiesEnv(IntegrationEnv):
 
     EXTERNAL_PATCHES: dict[str, str] = {}
     REST_ENDPOINT = "/api/v1/capabilities"
-    # Read the dispatcher contract: RestE2EDispatcher does
-    # ``getattr(env, "REST_METHOD", "post")``. Capabilities is a GET.
-    REST_METHOD = "get"
+    # Whether the last-built REST body carried request params. Set by
+    # ``build_rest_body`` (which both dispatch paths call first) and read by the
+    # ``REST_METHOD`` property to derive the verb — a single source of truth for
+    # the in-process and e2e dispatchers, instead of a hand-synced constant.
+    _rest_has_body: bool = False
 
     @realize_e2e(
         e2e_unsupported(
@@ -81,16 +86,44 @@ class CapabilitiesEnv(IntegrationEnv):
         """Call the get_adcp_capabilities tool via Client(mcp) — full pipeline."""
         return self._run_mcp_client("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
 
-    def _run_rest_request(self, endpoint: str, **kwargs: Any) -> Any:
-        """Issue the discovery GET.
+    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
+        """Build the REST body and record whether the request carried params.
 
-        The inherited implementation hardcodes ``client.post(...)`` with a JSON
-        body; ``/api/v1/capabilities`` is a GET with no body and would 405.
-        Everything before the verb (identity pop, factory commit, auth-dep
-        override) is reused via ``_prepare_rest_request``.
+        Capabilities discovery is parameterless today (``req=None`` → ``{}``), so
+        the recorded flag drives ``REST_METHOD`` to a bodyless GET. A future
+        parameterized request (protocols filter, context echo, version) yields a
+        non-empty body and POSTs it — the verb follows the request, not a
+        hand-synced constant.
+        """
+        body = super().build_rest_body(**kwargs)
+        self._rest_has_body = bool(body)
+        return body
+
+    @property
+    def REST_METHOD(self) -> str:  # noqa: N802 — dispatcher reads getattr(env, "REST_METHOD", "post")
+        """Verb derived from the request: POST when it carries a body, else GET.
+
+        ``RestE2EDispatcher`` (which never calls ``_run_rest_request``) reads this
+        AFTER it calls ``build_rest_body``, so the flag is current; the in-process
+        ``_run_rest_request`` reads the same property, so the two dispatch paths
+        can never disagree on the verb.
+        """
+        return "post" if self._rest_has_body else "get"
+
+    def _run_rest_request(self, endpoint: str, **kwargs: Any) -> Any:
+        """Dispatch capabilities over REST with the request-derived verb.
+
+        The inherited implementation always POSTs a JSON body; ``/api/v1/capabilities``
+        is a parameterless GET today, so a blind POST would 405. Build the body
+        (which sets the verb), then GET the parameterless route or POST the body
+        when params are present. Everything before the verb (identity pop, factory
+        commit, auth-dep override) is reused via ``_prepare_rest_request``.
         """
         client, _identity = self._prepare_rest_request(kwargs)
-        return client.get(endpoint)
+        body = self.build_rest_body(**kwargs)
+        if self.REST_METHOD == "get":
+            return client.get(endpoint)
+        return client.post(endpoint, json=body)
 
     def parse_rest_response(self, data: dict[str, Any]) -> GetAdcpCapabilitiesResponse:
         """Parse REST JSON into GetAdcpCapabilitiesResponse."""

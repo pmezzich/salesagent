@@ -51,6 +51,25 @@ def _wire_pricing_models(ctx: dict) -> Any:
     return _wire_media_buy(ctx).get("supported_pricing_models")
 
 
+def _assert_wire_pricing_equals(ctx: dict, expected: set[str]) -> None:
+    """Assert the wire pricing-model array equals ``expected`` exactly, no dupes.
+
+    The kernel both grading Then steps share: the wire value is a JSON array, its
+    set equals the expected surface, and it carries no duplicate entries
+    (``supported_pricing_models`` is a set on the wire). Callers own their own
+    error/absence prechecks and compute their own expected surface, then delegate
+    the array-shape + equality + dedup checks here so the three cannot drift.
+    """
+    models = _wire_pricing_models(ctx)
+    assert isinstance(models, list), (
+        f"media_buy.supported_pricing_models should be an array on the wire, got {models!r}"
+    )
+    assert set(models) == expected, (
+        f"wire pricing models diverge from the expected surface: wire={sorted(models)!r}, expected={sorted(expected)!r}"
+    )
+    assert len(models) == len(set(models)), f"duplicate pricing models on the wire: {models!r}"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Given
 # ═══════════════════════════════════════════════════════════════════════
@@ -151,13 +170,7 @@ def then_pricing_models_are_enum_values(ctx: dict) -> None:
     production filters against, so it could not redden on the path it graded
     (nor on a wrong-but-enum-legal emission like cpc-for-cpm).
     """
-    models = _wire_pricing_models(ctx)
-    assert models, "media_buy.supported_pricing_models absent — nothing to validate"
-    assert set(models) == _MOCK_ADAPTER_PRICING_SURFACE, (
-        f"wire pricing models diverge from the bound mock adapter's declared surface: "
-        f"wire={sorted(models)!r}, adapter={sorted(_MOCK_ADAPTER_PRICING_SURFACE)!r}"
-    )
-    assert len(models) == len(set(models)), f"duplicate pricing models on the wire: {models!r}"
+    _assert_wire_pricing_equals(ctx, set(_MOCK_ADAPTER_PRICING_SURFACE))
 
 
 @then("media_buy.supported_pricing_models should be absent from the wire body")
@@ -190,11 +203,4 @@ def then_pricing_models_exactly(ctx: dict, expected: str) -> None:
     error = ctx.get("error")
     assert error is None, f"capabilities request failed: {error!r}"
     expected_set = {tok.strip() for tok in expected.split(",")}
-    models = _wire_pricing_models(ctx)
-    assert isinstance(models, list), (
-        f"media_buy.supported_pricing_models should be an array on the wire, got {models!r}"
-    )
-    assert set(models) == expected_set, (
-        f"wire pricing models should be exactly {sorted(expected_set)!r}, got {sorted(models)!r}"
-    )
-    assert len(models) == len(expected_set), f"duplicate pricing models on the wire: {models!r}"
+    _assert_wire_pricing_equals(ctx, expected_set)
