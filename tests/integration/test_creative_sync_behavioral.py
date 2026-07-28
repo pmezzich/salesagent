@@ -16,7 +16,12 @@ import pytest
 from adcp.types import CreativeAction
 from adcp.types import FormatId as AdcpFormatId
 
-from src.core.exceptions import AdCPAuthenticationError, AdCPCreativeRejectedError, AdCPNotFoundError
+from src.core.exceptions import (
+    AdCPAuthenticationError,
+    AdCPCreativeRejectedError,
+    AdCPFormatNotFoundError,
+    AdCPNotFoundError,
+)
 from tests.factories import MediaBuyFactory, MediaPackageFactory, PrincipalFactory, ProductFactory, TenantFactory
 from tests.factories.creative_asset import build_assets, image_spec, make_test_banner_creative
 from tests.harness import CreativeSyncEnv, make_identity
@@ -86,26 +91,67 @@ def _assert_correctable(result) -> None:
     )
 
 
-def _assert_correctable_wire_entry(entry: dict) -> None:
-    """Wire-dict twin of :func:`_assert_correctable` — same contract, JSON shape.
+def _assert_failed_wire_entry(entry: dict, *, code: str, not_code: str, recovery: str = "correctable") -> None:
+    """Assert a per-creative FAILED wire entry carries the expected advisory code+recovery.
 
-    The in-process helper reads typed attributes and compares ``recovery.value``
-    (SDK ``Recovery`` is a non-str-mixin enum). Off a real transport the same
-    entry is plain JSON, so ``recovery`` is already a string and the errors are
-    dicts. Kept as a separate function rather than a duck-typed branch inside
-    ``_assert_correctable`` so neither surface can silently degrade to the
-    other's read path — a wire entry that stopped serializing ``recovery`` would
-    otherwise fall through a ``getattr`` default and pass.
+    Shared read-back for every wire-graded per-item failure contract: the caller
+    pins the ``code`` the advisory ``errors[]`` MUST carry, the ``not_code`` a
+    regression would leak instead, and the ``recovery`` the buyer keys retry
+    behavior on. Off a real transport the entry is plain JSON, so ``errors`` are
+    dicts and ``recovery`` is already a string (not the SDK ``Recovery`` enum the
+    in-process ``_assert_correctable`` compares by ``.value``). Both wire twins —
+    ``_assert_correctable_wire_entry`` and
+    ``_assert_format_not_found_normalized_on_wire`` — route through here, so one
+    edit cannot weaken one code's grading while the other stays green (the
+    copy-paste-drift risk the reviewer flagged on the in-process helpers).
     """
     assert entry.get("action") == "failed", f"expected a failed entry, got action={entry.get('action')!r}"
     errors = entry.get("errors") or []
     codes = [e.get("code") for e in errors]
-    assert "SERVICE_UNAVAILABLE" not in codes, f"correctable failure mis-coded as transient on the wire: {codes}"
-    assert "VALIDATION_ERROR" in codes, f"expected VALIDATION_ERROR on the wire, got {codes}"
-    validation = [e for e in errors if e.get("code") == "VALIDATION_ERROR"]
-    assert validation and all(e.get("recovery") == "correctable" for e in validation), (
-        f"VALIDATION_ERROR must carry recovery=correctable on the wire, got {[e.get('recovery') for e in validation]!r}"
+    assert not_code not in codes, f"{not_code} leaked to the wire: {codes}"
+    assert code in codes, f"expected {code} on the wire, got {codes}"
+    matching = [e for e in errors if e.get("code") == code]
+    assert matching and all(e.get("recovery") == recovery for e in matching), (
+        f"{code} must carry recovery={recovery} on the wire, got {[e.get('recovery') for e in matching]!r}"
     )
+
+
+def _assert_correctable_wire_entry(entry: dict) -> None:
+    """Wire-dict twin of :func:`_assert_correctable` — the correctable VALIDATION_ERROR contract.
+
+    The in-process helper reads typed attributes and compares ``recovery.value``
+    (SDK ``Recovery`` is a non-str-mixin enum). Off a real transport the same
+    entry is plain JSON, so ``recovery`` is already a string and the errors are
+    dicts. Kept as a named twin rather than a duck-typed branch inside
+    ``_assert_correctable`` so neither surface can silently degrade to the
+    other's read path. Grades that a buyer-correctable per-item failure surfaces
+    ``VALIDATION_ERROR`` with ``recovery=correctable`` and is never mis-coded as
+    the transient ``SERVICE_UNAVAILABLE`` (which a conforming buyer would retry
+    forever). Delegates the wire read-back to :func:`_assert_failed_wire_entry`.
+    """
+    _assert_failed_wire_entry(entry, code="VALIDATION_ERROR", not_code="SERVICE_UNAVAILABLE")
+
+
+def _assert_format_not_found_normalized_on_wire(entry: dict) -> None:
+    """Wire assertion for the FORMAT_NOT_FOUND -> INVALID_REQUEST normalization choke point.
+
+    A per-creative failure whose typed exception forwards its code through the
+    ``except AdCPError`` branch (``code=e.error_code``, _sync.py:363) must be
+    normalized by ``_failed_sync_result`` -> ``to_wire_error_code`` before it
+    serializes into the advisory ``errors[]``. ``AdCPFormatNotFoundError`` carries
+    the internal-only ``FORMAT_NOT_FOUND`` (INTERNAL_CODES, exceptions.py:123),
+    which MUST reach the buyer as the standard ``INVALID_REQUEST``
+    (ERROR_CODE_MAPPING, exceptions.py:65), never verbatim. Advisory ``errors[]``
+    entries serialize as-is and never pass through the boundary translator that
+    handles raised ``AdCPError``s, so a regression dropping the normalization
+    would leak ``FORMAT_NOT_FOUND`` on the wire — this asserts the normalized
+    value is present and the raw internal code is not.
+
+    Spec grounding (pinned AdCP 3.1.1, enums/error-code.json): INVALID_REQUEST is
+    a standard wire code, recovery ``correctable``; ``FORMAT_NOT_FOUND`` is not in
+    the enum. Delegates the wire read-back to :func:`_assert_failed_wire_entry`.
+    """
+    _assert_failed_wire_entry(entry, code="INVALID_REQUEST", not_code="FORMAT_NOT_FOUND")
 
 
 class TestSyncAuthRequired:
@@ -366,8 +412,9 @@ class TestCreativeValidation:
         → correctable. The typed AdCPValidationError is non-transient, so the
         `except AdCPError` path (_sync.py:363) keeps it as a per-item failure and
         forwards its already-wire-standard code — see
-        test_non_wire_typed_error_code_normalized_not_leaked for the sibling path
-        where the typed code is NOT wire-standard and must be normalized.
+        test_correctable_failure_code_and_recovery_on_the_wire for the sibling
+        path where the typed code (AdCPFormatNotFoundError, FORMAT_NOT_FOUND) is
+        NOT wire-standard and must be normalized to INVALID_REQUEST on the wire.
         """
         with CreativeSyncEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
@@ -441,33 +488,74 @@ class TestCreativeValidation:
         ``sync_creatives_raw`` ``_raw()`` shortcut instead of ``_run_a2a_handler``,
         so it never populates ``wire_response`` (see
         ``test_correctable_failure_code_and_recovery_via_a2a_raw_wrapper``). Removing
-        that shortcut is a shared-harness change tracked separately; once it lands,
-        add ``Transport.A2A`` here — this parametrization mirrors
+        that shortcut is a shared-harness change touching sibling A2A tests,
+        deferred to #1733; once it lands, add ``Transport.A2A`` here — this
+        parametrization mirrors
         ``test_strict_mode_unknown_assignment_creative_is_creative_not_found_on_wire``.
 
-        The payload is deliberately MIXED (one valid creative + one invalid): an
+        The payload is deliberately MIXED (one valid creative + two invalid): an
         all-invalid payload is rejected operation-level before per-item results
         exist, whereas a mixed one keeps the operation on the success branch and
-        rides the failure on ``creatives[]`` with ``action="failed"`` — the same
+        rides each failure on ``creatives[]`` with ``action="failed"`` — the same
         shape the sibling per-item wire tests read via ``_wire_entries`` (see
         ``test_orphan_assignment_error_surfaces_as_failed_result_on_wire``).
 
-        Read through ``_assert_correctable_wire_entry`` because ``recovery`` is a
-        plain JSON string here, not the SDK ``Recovery`` enum the in-process helper
-        compares by ``.value``.
+        Two distinct wire codes are graded off the one payload:
 
-        Spec grounding (pinned AdCP 3.1.1, enums/error-code.json): VALIDATION_ERROR →
-        recovery ``correctable``; SERVICE_UNAVAILABLE → ``transient``.
+        * ``c_bad`` (empty name) — an already-wire-standard ``VALIDATION_ERROR``
+          (``_sync.py:180``), read through ``_assert_correctable_wire_entry``.
+        * ``c_bad_format`` — the ``except AdCPError`` branch that forwards a TYPED
+          exception code (``code=e.error_code``, ``_sync.py:363``) through
+          ``_failed_sync_result`` -> ``to_wire_error_code``. Driving a real
+          ``AdCPFormatNotFoundError`` grades the ``FORMAT_NOT_FOUND`` ->
+          ``INVALID_REQUEST`` normalization choke point ON THE WIRE: that raw code
+          is internal-only (``INTERNAL_CODES``) and advisory ``errors[]`` serialize
+          verbatim without passing the boundary translator, so a regression that
+          dropped the normalization would leak ``FORMAT_NOT_FOUND`` to the buyer.
+          Previously this half was pinned only by ``call_impl`` and the direct
+          ``to_wire_error_code`` unit call. Read through
+          ``_assert_format_not_found_normalized_on_wire``.
+
+        Both wire read-backs go through ``_assert_failed_wire_entry`` because
+        ``recovery`` is a plain JSON string here, not the SDK ``Recovery`` enum the
+        in-process helper compares by ``.value``.
+
+        Spec grounding (pinned AdCP 3.1.1, enums/error-code.json): VALIDATION_ERROR
+        and INVALID_REQUEST → recovery ``correctable``; SERVICE_UNAVAILABLE →
+        ``transient``. ``FORMAT_NOT_FOUND`` is not a spec wire code — it maps to
+        ``INVALID_REQUEST`` via ``ERROR_CODE_MAPPING``.
         """
+        missing_format_id = "format_missing_on_agent_xyz"
+
+        def _get_format(agent_url, format_id):
+            # Raise the typed AdCPFormatNotFoundError (raw FORMAT_NOT_FOUND, an
+            # INTERNAL code) for the one bad format so the except-AdCPError branch
+            # (_sync.py:363) forwards e.error_code through _failed_sync_result ->
+            # to_wire_error_code; every other format still resolves so the valid
+            # creative is created. recovery=correctable keeps it a per-item failure.
+            if format_id == missing_format_id:
+                raise AdCPFormatNotFoundError(f"Unknown format_id '{format_id}' from agent {agent_url}")
+            return {"id": format_id, "name": "OK"}
+
         with CreativeSyncEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
             PrincipalFactory(tenant=tenant, principal_id="test_principal")
+
+            # Set side_effect on the env's existing get_format mock (the per-file
+            # hand-rolled-mock cap only shrinks) so fetch_format_spec re-raises the
+            # typed error for the bad-format creative and resolves the rest.
+            env.mock["registry"].return_value.get_format.side_effect = _get_format
 
             result = env.call_via(
                 transport,
                 creatives=[
                     _make_creative_asset(creative_id="c_ok", name="Valid Banner"),
                     _make_creative_asset(creative_id="c_bad", name=""),
+                    _make_creative_asset(
+                        creative_id="c_bad_format",
+                        name="Bad Format",
+                        format_id=AdcpFormatId(agent_url=DEFAULT_AGENT_URL, id=missing_format_id),
+                    ),
                 ],
             )
 
@@ -476,11 +564,23 @@ class TestCreativeValidation:
             )
             assert result.wire_response is not None, f"{transport.value} success must expose the wire body"
             entries = _wire_entries(result)
-            entry = entries.get("c_bad")
-            assert entry is not None, (
+
+            # Empty-name half: already-wire-standard VALIDATION_ERROR (correctable).
+            correctable_entry = entries.get("c_bad")
+            assert correctable_entry is not None, (
                 f"the failed creative must appear on the {transport.value} wire, not be dropped: {result.wire_response}"
             )
-            _assert_correctable_wire_entry(entry)
+            _assert_correctable_wire_entry(correctable_entry)
+
+            # Non-wire-code half: the typed AdCPFormatNotFoundError forwarded through
+            # the except-AdCPError branch must reach the buyer NORMALIZED to
+            # INVALID_REQUEST, never as the raw internal FORMAT_NOT_FOUND.
+            format_entry = entries.get("c_bad_format")
+            assert format_entry is not None, (
+                f"the format-not-found creative must appear on the {transport.value} wire, "
+                f"not be dropped: {result.wire_response}"
+            )
+            _assert_format_not_found_normalized_on_wire(format_entry)
 
     def test_pydantic_schema_failure_uses_correctable_code(self, integration_db):
         """The OTHER failure branch — a creative that fails PYDANTIC construction —
