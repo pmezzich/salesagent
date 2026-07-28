@@ -86,7 +86,7 @@ def _merge_structured_filters(filters: "CreativeFilters | None", flat_params: di
     return flat_params
 
 
-def _enforce_filter_list_caps(structured_filters: Any) -> None:
+def _enforce_filter_list_caps(structured_filters: "CreativeFilters | None") -> None:
     """Reject any list-valued filter longer than ``_MAX_FILTER_LIST_LEN``.
 
     Runs on the MERGED filters (the object the query actually runs off) — checking

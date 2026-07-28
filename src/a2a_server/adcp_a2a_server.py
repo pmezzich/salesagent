@@ -1704,6 +1704,7 @@ class AdCPRequestHandler(RequestHandler):
         # Call core function with optional parameters (fixing original validation bug)
         response = core_list_creatives_tool(
             media_buy_id=parameters.get("media_buy_id"),
+            media_buy_ids=parameters.get("media_buy_ids"),
             status=parameters.get("status"),
             format=parameters.get("format"),
             tags=parameters.get("tags", []),

@@ -14,46 +14,34 @@ from adcp import CreativeFilters
 
 from src.core.exceptions import AdCPValidationError
 from src.core.tools.creatives.listing import _CAPPED_FILTER_FIELDS, _MAX_FILTER_LIST_LEN
-from tests.factories import PrincipalFactory, TenantFactory
-from tests.harness import CreativeListEnv, make_identity
+from tests.harness import CreativeListEnv
 from tests.harness.transport import Transport
 from tests.helpers import assert_envelope_shape
 
-# Wire transports that surface the two-layer envelope for tool-raised AdCPErrors
-# (mirrors test_list_creatives_concept_filter.py's _HELPER_WIRE rationale).
-_HELPER_WIRE = [Transport.A2A, Transport.REST]
+# Wire transports only — IMPL has no wire envelope. The cap raises from
+# _enforce_filter_list_caps inside _build_list_creatives_request, a
+# transport-blind path, so the same VALIDATION_ERROR envelope surfaces on every
+# wire transport (mirrors test_list_creatives_concept_filter.py's _ALL_WIRE,
+# which grades MCP too).
+_ALL_WIRE = [Transport.A2A, Transport.MCP, Transport.REST]
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
-
-_TENANT = "cap_test_tenant"
-_PRINCIPAL = "advertiser_a"
-
-
-def _seed():
-    tenant = TenantFactory(tenant_id=_TENANT)
-    PrincipalFactory(tenant=tenant, principal_id=_PRINCIPAL)
-
-
-def _identity():
-    return make_identity(
-        principal_id=_PRINCIPAL,
-        tenant_id=_TENANT,
-        tenant={"tenant_id": _TENANT, "name": "Cap Test Tenant"},
-    )
 
 
 class TestListCreativesFilterCap:
     def test_over_long_filter_rejected(self, integration_db):
         """A list filter longer than the cap -> VALIDATION_ERROR (correctable).
 
-        Oracle: if the cap in _list_creatives_impl is removed, the impl runs the
-        query and returns a response instead of raising, so this test fails.
+        Oracle: if ``_enforce_filter_list_caps`` (called from
+        ``_build_list_creatives_request``) is removed, the request builds and
+        ``_list_creatives_impl`` runs the query and returns a response instead of
+        raising, so this test fails.
         """
         with CreativeListEnv() as env:
-            _seed()
+            env.setup_default_data()
             over = CreativeFilters(concept_ids=[f"concept-{i}" for i in range(_MAX_FILTER_LIST_LEN + 1)])
             with pytest.raises(AdCPValidationError) as exc:
-                env.call_impl(identity=_identity(), filters=over)
+                env.call_impl(filters=over)
 
         assert exc.value.recovery == "correctable"
         assert "concept_ids" in str(exc.value)
@@ -63,22 +51,22 @@ class TestListCreativesFilterCap:
     def test_filter_at_cap_is_allowed(self, integration_db):
         """Exactly at the cap is accepted (boundary / negative control)."""
         with CreativeListEnv() as env:
-            _seed()
+            env.setup_default_data()
             at_cap = CreativeFilters(concept_ids=[f"concept-{i}" for i in range(_MAX_FILTER_LIST_LEN)])
-            response = env.call_impl(identity=_identity(), filters=at_cap)
+            response = env.call_impl(filters=at_cap)
 
         # Concrete post-condition: the query RAN (did not raise) and returned
         # an empty, well-formed result for the unmatched concept ids.
         assert response.query_summary is not None
         assert response.query_summary.total_matching == 0
 
-    @pytest.mark.parametrize("transport", _HELPER_WIRE)
+    @pytest.mark.parametrize("transport", _ALL_WIRE)
     def test_over_cap_concept_ids_emits_validation_envelope(self, integration_db, transport):
         """Over-cap structured filter surfaces the spec VALIDATION_ERROR envelope
-        on the wire (Error Verification Policy: grade the wire, not the
-        reconstructed exception)."""
+        on every wire transport (Error Verification Policy: grade the wire, not
+        the reconstructed exception)."""
         with CreativeListEnv() as env:
-            _seed()
+            env.setup_default_data()
             result = env.call_via(
                 transport,
                 filters={"concept_ids": [f"c-{i}" for i in range(_MAX_FILTER_LIST_LEN + 1)]},
@@ -93,23 +81,28 @@ class TestListCreativesFilterCap:
                 message_substr="concept_ids",
             )
 
-    def test_over_cap_flat_media_buy_ids_rejected_on_wire(self, integration_db):
+    @pytest.mark.parametrize("transport", _ALL_WIRE)
+    def test_over_cap_flat_media_buy_ids_rejected_on_wire(self, integration_db, transport):
         """FLAT list params are capped too — the cap runs on the MERGED filters.
 
         Oracle for the merge placement: with the cap checked only on the
         pre-merge ``filters`` argument (the original implementation), a flat
         ``media_buy_ids`` list of 101 entries reaches the query and this test
         fails with a 200-style success instead of the envelope.
+
+        The flat ``media_buy_ids`` path reaches the merged filters and the
+        ``IN (...)`` expansion on all three wire transports, so grade it on each
+        (A2A/MCP/REST), not REST alone.
         """
         with CreativeListEnv() as env:
-            _seed()
+            env.setup_default_data()
             result = env.call_via(
-                Transport.REST,
+                transport,
                 media_buy_ids=[f"mb-{i}" for i in range(_MAX_FILTER_LIST_LEN + 1)],
             )
 
             envelope = result.wire_error_envelope
-            assert envelope is not None, "no wire error envelope captured for flat media_buy_ids"
+            assert envelope is not None, f"{transport}: no wire error envelope captured for flat media_buy_ids"
             assert_envelope_shape(
                 envelope,
                 "VALIDATION_ERROR",
