@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from src.core.resolved_identity import ResolvedIdentity
@@ -83,9 +83,15 @@ class GetProductsBody(SalesAgentBaseModel):
     # production-gated unknown-field strip. A2A does return success, but it
     # accepts any unknown field, so that is not evidence of support either.
     #
-    # Typed str|None rather than the enum: the internal GetProductsRequest
-    # widens it the same way. No transport acts on the value yet.
-    buying_mode: str | None = None
+    # Typed to the pinned enum, not str: get-products-request.json@3.1.1 defines
+    # buying_mode as enum ["brief","wholesale","refine"], and the UC-001 storyboard
+    # grades the out-of-enum case as an error (@T-UC-001-partition-buying-mode /
+    # @T-UC-001-boundary-buying-mode), so the REST boundary rejects a non-spec value
+    # instead of accepting "garbage" at 200. Literal[...] is a subtype of str, so it
+    # still assigns cleanly into the internal GetProductsRequest (which widens the
+    # field to str|None) if it were ever threaded — narrowing the boundary here does
+    # not fork the internal contract. No transport acts on the value yet.
+    buying_mode: Literal["brief", "wholesale", "refine"] | None = None
     adcp_version: str = "1.0.0"
 
 

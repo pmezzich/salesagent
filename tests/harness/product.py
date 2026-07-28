@@ -43,6 +43,12 @@ from src.core.schemas import GetProductsResponse
 from tests.harness._base import IntegrationEnv
 from tests.harness._mixins import ProductMixin
 
+# The field set of GetProductsBody (src/routes/api_v1.py), used to shape the REST
+# POST body. Hand-listed here (rather than derived) so this module keeps its
+# tests/harness -> src.routes non-dependency; the drift against the model is pinned
+# by test_body_fields_match_model in tests/unit/test_rest_api_products.py.
+_BODY_FIELDS = ("brief", "brand", "filters", "buying_mode", "adcp_version")
+
 
 class ProductEnv(ProductMixin, IntegrationEnv):
     """Integration test environment for _get_products_impl.
@@ -109,10 +115,10 @@ class ProductEnv(ProductMixin, IntegrationEnv):
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """Convert kwargs to GetProductsBody shape for REST POST.
 
-        GetProductsBody (src/routes/api_v1.py) accepts:
-            brief, brand, filters, buying_mode, adcp_version
+        Shapes the body from ``_BODY_FIELDS``, which is pinned to
+        ``GetProductsBody.model_fields`` by ``test_body_fields_match_model`` in
+        ``tests/unit/test_rest_api_products.py`` so the two cannot drift.
         """
-        _BODY_FIELDS = ("brief", "brand", "filters", "buying_mode", "adcp_version")
         return {k: kwargs[k] for k in _BODY_FIELDS if k in kwargs and kwargs[k] is not None}
 
     def parse_rest_response(self, data: dict[str, Any]) -> GetProductsResponse:
