@@ -17,6 +17,21 @@ from tests.harness._base import IntegrationEnv
 from tests.harness.media_buy_create import MediaBuyCreateEnv
 
 
+def _is_create_request(kwargs: dict[str, Any]) -> bool:
+    """True when the composite create→list env should route to the create path.
+
+    Module-level and greppable, mirroring ``MediaBuyDualEnv``'s
+    ``_is_update_request``. Keyed on the BASE op (create) rather than the added
+    (list) op, though: a create request always arrives as a typed
+    ``req=CreateMediaBuyRequest``, whereas a list request arrives as loose kwargs
+    (``media_buy_ids`` / filters / none) with no single positive marker — so the
+    typed create op is the robust discriminator here.
+    """
+    from src.core.schemas import CreateMediaBuyRequest
+
+    return isinstance(kwargs.get("req"), CreateMediaBuyRequest)
+
+
 class _MediaBuyListDispatch(IntegrationEnv):
     """Canonical get_media_buys dispatch (impl / real-A2A-skill / MCP wrapper).
 
@@ -111,23 +126,31 @@ class MediaBuyCreateListEnv(_MediaBuyListDispatch, MediaBuyCreateEnv):
     read that needs no patches).
     """
 
-    @staticmethod
-    def _is_create_request(kwargs: dict[str, Any]) -> bool:
-        from src.core.schemas import CreateMediaBuyRequest
-
-        return isinstance(kwargs.get("req"), CreateMediaBuyRequest)
-
     def call_impl(self, **kwargs: Any) -> Any:
-        if self._is_create_request(kwargs):
+        if _is_create_request(kwargs):
             return super().call_impl(**kwargs)
         return self._list_impl(**kwargs)
 
     def call_a2a(self, **kwargs: Any) -> Any:
-        if self._is_create_request(kwargs):
+        if _is_create_request(kwargs):
             return super().call_a2a(**kwargs)
         return self._list_a2a(**kwargs)
 
     def call_mcp(self, **kwargs: Any) -> Any:
-        if self._is_create_request(kwargs):
+        if _is_create_request(kwargs):
             return super().call_mcp(**kwargs)
         return self._list_mcp(**kwargs)
+
+    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
+        # UC-019 is REST-excluded (_NO_REST_UC_TAG_PREFIXES covers "T-UC-019-"),
+        # so this composite env has no REST list route. Fail loud rather than let
+        # a list request fall through to the inherited create POST
+        # (/api/v1/media-buys) if REST list ever activates — MediaBuyDualEnv
+        # likewise routes REST explicitly instead of inheriting it unrouted.
+        if not _is_create_request(kwargs):
+            raise NotImplementedError(
+                "MediaBuyCreateListEnv has no REST route for get_media_buys "
+                "(UC-019 is REST-excluded); wire an explicit list REST route "
+                "before dispatching a list request over REST."
+            )
+        return super().build_rest_body(**kwargs)

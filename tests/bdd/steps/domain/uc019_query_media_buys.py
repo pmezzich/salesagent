@@ -1314,11 +1314,13 @@ def _get_media_buys(ctx: dict) -> list:
     return buys or []
 
 
-def _find_single_media_buy(ctx: dict, mb_id: str):
+def _find_single_media_buy(ctx: dict, mb_id: str, expected_status: str | None = None):
     """Resolve a label and return the SINGLE matching media buy from the response.
 
     Shared matcher for every step that locates one buy by label — one place to
-    fix if the matching logic ever changes.
+    fix if the matching logic ever changes. When ``expected_status`` is given,
+    also assert the buy's status (enum-normalized) equals it: the single home
+    for the status coerce+equality tail otherwise copied into every by-id step.
     """
     real_id = _resolve_media_buy_id(ctx, mb_id)
     buys = _get_media_buys(ctx)
@@ -1327,17 +1329,18 @@ def _find_single_media_buy(ctx: dict, mb_id: str):
         f"Expected exactly one media buy '{mb_id}' (real_id={real_id}) in response, "
         f"got IDs: {[getattr(b, 'media_buy_id', None) for b in buys]}"
     )
-    return matching[0]
+    entry = matching[0]
+    if expected_status is not None:
+        actual = getattr(entry, "status", None)
+        actual_str = actual.value if hasattr(actual, "value") else str(actual)
+        assert actual_str == expected_status, f"Expected status '{expected_status}' for '{mb_id}', got '{actual_str}'"
+    return entry
 
 
 @then(parsers.parse('the response should include media buy "{mb_id}" with status "{status}"'))
 def then_response_includes_mb_with_status(ctx: dict, mb_id: str, status: str) -> None:
     """Assert response includes the media buy with expected status."""
-    entry = _find_single_media_buy(ctx, mb_id)
-    actual_status = getattr(entry, "status", None)
-    # Status may be an enum — convert to string
-    actual_str = actual_status.value if hasattr(actual_status, "value") else str(actual_status)
-    assert actual_str == status, f"Expected status '{status}' for {mb_id}, got '{actual_str}'"
+    _find_single_media_buy(ctx, mb_id, expected_status=status)
 
 
 @then(
@@ -1676,10 +1679,7 @@ def then_suggestion_contains_any_of_three(ctx: dict, text1: str, text2: str, tex
 @then(parsers.parse('the media buy "{mb_id}" should have status "{expected_status}"'))
 def then_media_buy_has_status(ctx: dict, mb_id: str, expected_status: str) -> None:
     """Assert a specific media buy has the expected status in the response."""
-    entry = _find_single_media_buy(ctx, mb_id)
-    actual = getattr(entry, "status", None)
-    actual_str = actual.value if hasattr(actual, "value") else str(actual)
-    assert actual_str == expected_status, f"Expected status '{expected_status}' for '{mb_id}', got '{actual_str}'"
+    _find_single_media_buy(ctx, mb_id, expected_status=expected_status)
 
 
 @then(parsers.parse("the error message should include field-level validation details"))
@@ -2531,6 +2531,12 @@ def then_unavailable_reason_shorthand(ctx: dict, reason: str) -> None:
 # until synced) — the known state the status assertion compares against.
 _POST_CREATE_EXPECTED_STATUS = "pending_creatives"
 
+# Transport envelope framing keys that wrap the GetMediaBuysResponse object on
+# the wire and are legitimately not model fields (A2A merges message/success
+# into the DataPart; the protocol envelope may add status/task_id/context_id).
+# Any OTHER discarded top-level key is a wire regression, not framing.
+_KNOWN_ENVELOPE_KEYS = frozenset({"message", "success", "status", "task_id", "context_id"})
+
 
 @given("the buyer captured a media_buy_id from a successful create_media_buy response")
 def given_buyer_captured_media_buy_id(ctx: dict) -> None:
@@ -2540,9 +2546,8 @@ def given_buyer_captured_media_buy_id(ctx: dict) -> None:
     CREATE RESPONSE returned — the exact artifact the storyboard's
     create_buy → check_buy_status chain hands to the poll.
     """
-    from types import SimpleNamespace
-
     from src.core.schemas import CreateMediaBuyRequest
+    from tests.bdd.steps._outcome_helpers import wire_field
     from tests.bdd.steps.generic.given_media_buy import _ensure_request_defaults
 
     req = CreateMediaBuyRequest(**_ensure_request_defaults(ctx))
@@ -2555,10 +2560,28 @@ def given_buyer_captured_media_buy_id(ctx: dict) -> None:
     mb_id = getattr(inner, "media_buy_id", None)
     assert mb_id, f"create_media_buy response carries no media_buy_id: {inner!r}"
 
+    # Pin the expected poll status from the status the CREATE returned ON THE
+    # WIRE — not a bare literal — so a create/poll status divergence can't stay
+    # green. Read ``media_buy_status`` (the domain MediaBuyStatus that
+    # get_media_buys later echoes as its ``status``), NOT the top-level wire
+    # ``status``, which the envelope overwrites with the PROTOCOL TaskStatus
+    # ("completed") — a different namespace (src/core/schemas/_base.py:
+    # TaskResultEnvelope._serialize / _mirror_media_buy_status). ``wire_field``'s
+    # guard raises if a real-wire transport failed to stash the create wire.
+    # The equality against the module constant stays as a determinism gate on
+    # the freshly-created state.
+    create_status = wire_field(ctx, "media_buy_status")
+    assert create_status == _POST_CREATE_EXPECTED_STATUS, (
+        f"create returned media_buy_status {create_status!r}, expected {_POST_CREATE_EXPECTED_STATUS!r}"
+    )
+
     # Label registry only — no parallel ctx key; downstream steps resolve
     # "mb-created" via _resolve_media_buy_id like every other UC-019 scenario.
-    _register_media_buy(ctx, "mb-created", SimpleNamespace(media_buy_id=mb_id))
-    ctx["expected_media_buy_status"] = _POST_CREATE_EXPECTED_STATUS
+    # Register the real create-response object (carries the id and status), not a
+    # one-attribute stand-in, so a future shared step reading a second field gets
+    # the real object.
+    _register_media_buy(ctx, "mb-created", inner)
+    ctx["expected_media_buy_status"] = create_status
     # Clear the create response so the When's poll is asserted on clean state.
     ctx.pop("response", None)
     ctx.pop("wire_response", None)
@@ -2576,25 +2599,35 @@ def when_query_captured_media_buy_id(ctx: dict) -> None:
 def then_response_schema_valid_get_media_buys(ctx: dict) -> None:
     """Validate the WIRE payload against the pinned GetMediaBuysResponse model.
 
-    The repo ships no standalone JSON schema; the pinned Pydantic model is the
-    schema for AdCP 3.1.0-beta.3 (docs/adcp-spec-version.md). Reads the payload
-    through the shared ``wire_dict`` helper: the real ``ctx["wire_response"]`` the
-    buyer received on REST/A2A/MCP (its guard raises if a real-wire transport
-    failed to stash it, rather than silently degrading), or the production
-    serialization of the typed response on IMPL (which round-trips the model but
-    cannot observe a wire serialization regression).
+    The repo ships no standalone JSON schema — the adcp dist publishes no schema
+    dir for the CI-pinned AdCP 3.1.1 (pyproject ``adcp==6.6.0``,
+    tests/unit/test_adcp_spec_version.py, docs/adcp-spec-version.md) — so the
+    pinned Pydantic model is the local schema proxy. Reads the payload through
+    the shared ``wire_dict`` helper: the real ``ctx["wire_response"]`` the buyer
+    received on REST/A2A/MCP (its guard raises if a real-wire transport failed to
+    stash it, rather than silently degrading), or the production serialization of
+    the typed response on IMPL (which round-trips the model but cannot observe a
+    wire serialization regression).
     """
     from src.core.schemas import GetMediaBuysResponse
     from tests.bdd.steps._outcome_helpers import wire_dict
 
     # wire_dict returns the real wire body on REST/A2A/MCP (its guard raises if a
     # real-wire transport failed to stash it, rather than silently degrading), and
-    # the production serialization of the typed response on IMPL. Transport framing
-    # adds envelope keys around the response object, so validate the model's own
-    # fields as they appear on the wire — this still catches a serialization
-    # regression in every response field while tolerating the envelope.
+    # the production serialization of the typed response on IMPL.
     wire = wire_dict(ctx)
-    payload = {k: v for k, v in wire.items() if k in GetMediaBuysResponse.model_fields}
+    model_field_names = set(GetMediaBuysResponse.model_fields)
+    # Transport framing wraps the response object in envelope keys, so validate
+    # the model's own fields as they appear on the wire. But fail loud on any
+    # UNKNOWN discarded top-level key — a wire regression that ADDS a bogus field
+    # would otherwise be silently filtered out and pass unseen.
+    unexpected = set(wire) - model_field_names - _KNOWN_ENVELOPE_KEYS
+    assert not unexpected, (
+        f"unexpected top-level wire keys {sorted(unexpected)} — neither "
+        "GetMediaBuysResponse fields nor known envelope framing; a wire "
+        "regression may have added a bogus field"
+    )
+    payload = {k: v for k, v in wire.items() if k in model_field_names}
     assert "media_buys" in payload, f"wire payload carries no media_buys — keys: {sorted(wire)}"
     GetMediaBuysResponse.model_validate(payload)
 
@@ -2609,11 +2642,9 @@ def then_media_buys_includes_captured(ctx: dict) -> None:
 def then_included_entry_same_id_and_status(ctx: dict) -> None:
     """Assert the resolved entry echoes the created id and its ACTUAL status.
 
-    Status is compared for equality against the known post-create state — a
-    presence check would stay green if production returned any status at all.
+    Status is compared for equality against the status the create returned on
+    the wire (pinned in the Given) — a presence check would stay green if
+    production returned any status at all. Routes through the shared matcher so
+    the coerce+equality tail lives in one place.
     """
-    entry = _find_single_media_buy(ctx, "mb-created")
-    expected = ctx["expected_media_buy_status"]
-    actual = getattr(entry, "status", None)
-    actual_str = actual.value if hasattr(actual, "value") else str(actual)
-    assert actual_str == expected, f"Expected the freshly-created buy to report status '{expected}', got '{actual_str}'"
+    _find_single_media_buy(ctx, "mb-created", expected_status=ctx["expected_media_buy_status"])
