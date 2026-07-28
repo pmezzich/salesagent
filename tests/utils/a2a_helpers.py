@@ -13,6 +13,8 @@ from unittest.mock import ANY
 from a2a.types import Artifact, Message, Part, Role
 from google.protobuf import json_format, struct_pb2
 
+from src.core.resolved_identity import ResolvedIdentity
+
 
 def assert_delivery_forwarded_account(mock_delivery, expected_account) -> None:
     """Assert ``core_get_media_buy_delivery_tool`` was called once forwarding ``expected_account``.
@@ -119,18 +121,22 @@ def create_a2a_text_message(text: str) -> Message:
     return msg
 
 
-def make_a2a_identity(sample_tenant, sample_principal):
+def make_a2a_identity(sample_tenant: dict, sample_principal: dict) -> ResolvedIdentity:
     """Build a ``ResolvedIdentity`` for an A2A test, from the standard fixtures.
+
+    Delegates to the canonical ``tests.harness.make_identity`` (itself a thin
+    wrapper over ``PrincipalFactory.make_identity``) rather than reimplementing the
+    call, so the A2A suite routes through the one identity home the harness exposes
+    and keeps its ``-> ResolvedIdentity`` contract in a single place.
 
     Shared because the A2A integration tests all need the identical
     ``protocol="a2a"`` identity and were each carrying a byte-identical private
-    copy. (Only the A2A shape is consolidated here; the wider ``_make_identity``
-    spread across the integration suite uses differing signatures and is a
-    separate cleanup.)
+    copy. The ~17 builds in ``test_a2a_error_responses.py`` are the same 5-arg
+    shape and are the follow-up migration onto this helper.
     """
-    from tests.factories.principal import PrincipalFactory
+    from tests.harness import make_identity
 
-    return PrincipalFactory.make_identity(
+    return make_identity(
         principal_id=sample_principal["principal_id"],
         tenant_id=sample_tenant["tenant_id"],
         tenant=sample_tenant,

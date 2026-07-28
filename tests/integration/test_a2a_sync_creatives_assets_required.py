@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A2A sync_creatives: a creative with no ``assets`` map is refused at the boundary.
+"""A2A sync_creatives: the explicit-skill boundary refuses a creative with no ``assets`` map.
 
 ``assets`` is a REQUIRED field on ``CreativeAsset`` in AdCP 3.1.1, and the
 creative's url lives INSIDE that map — the schema has no top-level ``url``. So a
@@ -7,11 +7,21 @@ url-shaped creative that omits ``assets`` is malformed, and the A2A boundary mus
 refuse it with a structured two-layer ``VALIDATION_ERROR`` rather than silently
 injecting the missing field.
 
-That matches MCP, whose ``sync_creatives`` is typed ``creatives:
-list[CreativeAsset]`` and so rejects the same shape via FastMCP's coercion. This
-guard exists so the lenient ``assets`` default — which still lives on the impl's
-REST path — is never reintroduced at the A2A boundary, where it would silently
-move A2A off both MCP and the schema.
+Scope: this pins the A2A *explicit skill-invocation* path only —
+``on_message_send`` → ``_handle_sync_creatives_skill`` — which constructs
+``CreativeAsset`` strictly. It is deliberately NOT a cross-transport claim. No
+``BR-UC-006`` BDD scenario covers this path: ``CreativeSyncEnv.call_a2a``
+(tests/harness/creative_sync.py) routes a2a sync_creatives through
+``sync_creatives_raw``, which forwards raw dicts to the impl and defaults
+``assets`` — bypassing this boundary — so this integration test is the only
+coverage of the skill-boundary refusal. MCP rejects the same shape via its typed
+``list[CreativeAsset]`` signature (type-enforced, not wire-pinned); REST still
+defaults ``assets={}`` via ``_creative_asset_from_wire_dict`` and accepts. That
+REST/A2A-raw-vs-MCP/A2A-skill divergence, and whether a schema-invalid item should
+ride back per-item instead, is a separate cross-transport reconciliation, not this
+guard's subject. This guard exists so the lenient ``assets`` default is never
+reintroduced at the A2A skill boundary, where it would silently move that path off
+both MCP and the schema.
 """
 
 import logging
