@@ -74,12 +74,15 @@ def _assert_correctable(result) -> None:
     """
     assert result.action == "failed", f"expected a failed result, got action={result.action!r}"
     errors = result.errors or []
-    codes = [getattr(e, "code", None) for e in errors]
+    # Read .code/.recovery directly off AdCPErrorDetail (a Pydantic model that
+    # guarantees both fields) — a model-shape drift that renamed an attribute
+    # must fail loudly here, not slip through a getattr default as None and pass.
+    codes = [e.code for e in errors]
     assert "SERVICE_UNAVAILABLE" not in codes, f"correctable failure mis-coded as transient: {codes}"
     assert "VALIDATION_ERROR" in codes, f"expected VALIDATION_ERROR, got {codes}"
-    validation = [e for e in errors if getattr(e, "code", None) == "VALIDATION_ERROR"]
+    validation = [e for e in errors if e.code == "VALIDATION_ERROR"]
     assert validation and all(e.recovery is not None and e.recovery.value == "correctable" for e in validation), (
-        f"VALIDATION_ERROR must carry recovery=correctable, got {[getattr(e, 'recovery', None) for e in validation]!r}"
+        f"VALIDATION_ERROR must carry recovery=correctable, got {[e.recovery for e in validation]!r}"
     )
 
 
@@ -343,8 +346,8 @@ class TestCreativeValidation:
         version.md, SDK 6.6.0): VALIDATION_ERROR → recovery ``correctable``,
         SERVICE_UNAVAILABLE → recovery ``transient``. error-handling.mdx: a
         correctable failure is fixed and resubmitted, a transient one retried
-        as-is. Graded in-process here; the A2A wire equivalent is
-        test_correctable_failure_code_and_recovery_on_the_rest_wire.
+        as-is. Graded in-process here; the real-wire equivalent (REST + MCP) is
+        test_correctable_failure_code_and_recovery_on_the_wire.
         """
         with CreativeSyncEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
@@ -400,7 +403,7 @@ class TestCreativeValidation:
         object read below is the same in-process ``SyncCreativeResult`` the two
         tests above read, one wrapper layer out. Real transport coverage for this
         contract lives in
-        ``test_correctable_failure_code_and_recovery_on_the_rest_wire``.
+        ``test_correctable_failure_code_and_recovery_on_the_wire`` (REST + MCP).
 
         Kept as a thin guard that the wrapper forwards per-item results unchanged;
         the earlier name and docstring here claimed an artifact-DataPart read this
@@ -424,19 +427,30 @@ class TestCreativeValidation:
             assert entry is not None, f"expected the failed creative in the wrapper result: {creatives!r}"
             _assert_correctable(entry)
 
-    def test_correctable_failure_code_and_recovery_on_the_rest_wire(self, integration_db):
+    @pytest.mark.parametrize("transport", [Transport.REST, Transport.MCP], ids=lambda t: t.value)
+    def test_correctable_failure_code_and_recovery_on_the_wire(self, integration_db, transport):
         """The correctable per-creative code+recovery must survive a REAL serialization
         boundary, not only the in-process ``SyncCreativeResult``. A boundary that
         dropped or re-coerced ``errors[].code`` / ``.recovery`` would leave every
         in-process test above green while shipping the wrong retry contract to buyers.
 
-        Graded on REST, which populates ``wire_response`` with the actual JSON body.
+        Graded on every transport that crosses a real wire and populates
+        ``wire_response``: REST (HTTP JSON body) and MCP (``_run_mcp_client``, the
+        full FastMCP pipeline — its ``structured_content``). A2A is deliberately
+        excluded, not silently: ``CreativeSyncEnv.call_a2a`` takes the
+        ``sync_creatives_raw`` ``_raw()`` shortcut instead of ``_run_a2a_handler``,
+        so it never populates ``wire_response`` (see
+        ``test_correctable_failure_code_and_recovery_via_a2a_raw_wrapper``). Removing
+        that shortcut is a shared-harness change tracked separately; once it lands,
+        add ``Transport.A2A`` here — this parametrization mirrors
+        ``test_strict_mode_unknown_assignment_creative_is_creative_not_found_on_wire``.
+
         The payload is deliberately MIXED (one valid creative + one invalid): an
         all-invalid payload is rejected operation-level before per-item results
         exist, whereas a mixed one keeps the operation on the success branch and
         rides the failure on ``creatives[]`` with ``action="failed"`` — the same
         shape the sibling per-item wire tests read via ``_wire_entries`` (see
-        ``test_lenient_mode_orphan_assignment_surfaces_error_on_wire``).
+        ``test_orphan_assignment_error_surfaces_as_failed_result_on_wire``).
 
         Read through ``_assert_correctable_wire_entry`` because ``recovery`` is a
         plain JSON string here, not the SDK ``Recovery`` enum the in-process helper
@@ -445,14 +459,12 @@ class TestCreativeValidation:
         Spec grounding (pinned AdCP 3.1.1, enums/error-code.json): VALIDATION_ERROR →
         recovery ``correctable``; SERVICE_UNAVAILABLE → ``transient``.
         """
-        from tests.harness.transport import Transport
-
         with CreativeSyncEnv() as env:
             tenant = TenantFactory(tenant_id="test_tenant")
             PrincipalFactory(tenant=tenant, principal_id="test_principal")
 
             result = env.call_via(
-                Transport.REST,
+                transport,
                 creatives=[
                     _make_creative_asset(creative_id="c_ok", name="Valid Banner"),
                     _make_creative_asset(creative_id="c_bad", name=""),
@@ -460,13 +472,13 @@ class TestCreativeValidation:
             )
 
             assert not result.is_error, (
-                f"a mixed payload must stay on the REST success branch: {result.wire_error_envelope}"
+                f"a mixed payload must stay on the {transport.value} success branch: {result.wire_error_envelope}"
             )
-            assert result.wire_response is not None, "REST success must expose the wire body"
+            assert result.wire_response is not None, f"{transport.value} success must expose the wire body"
             entries = _wire_entries(result)
             entry = entries.get("c_bad")
             assert entry is not None, (
-                f"the failed creative must appear on the REST wire, not be dropped: {result.wire_response}"
+                f"the failed creative must appear on the {transport.value} wire, not be dropped: {result.wire_response}"
             )
             _assert_correctable_wire_entry(entry)
 
