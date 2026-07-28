@@ -8,7 +8,11 @@ from src.core.exceptions import (
     to_wire_error_code,
 )
 from src.core.validation_helpers import adcp_validation_boundary
-from tests.helpers import assert_no_raw_validation_leak
+from tests.helpers import (
+    RAW_EXCEPTION_LEAK_SENTINEL,
+    assert_no_raw_exception_leak,
+    assert_no_raw_validation_leak,
+)
 
 
 def test_pydantic_validation_error_normalization_is_structured_and_sanitized():
@@ -81,14 +85,13 @@ def test_untyped_exception_message_is_generic_not_raw():
     and the A2A failed-Task webhook body. Deletion oracle: reverting the sink to
     ``AdCPError(str(exc))`` leaks 'secret_table' here.
     """
-    leaky = RuntimeError("SELECT token FROM secret_table WHERE tenant='acme'")
+    leaky = RuntimeError(RAW_EXCEPTION_LEAK_SENTINEL)
 
     normalized = normalize_to_adcp_error(leaky)
 
     assert normalized.error_code == "INTERNAL_ERROR"
     assert normalized.message == GENERIC_INTERNAL_ERROR_MESSAGE
-    assert "secret_table" not in normalized.message
-    assert "SELECT" not in normalized.message
+    assert_no_raw_exception_leak(normalized.message)
 
 
 def test_generic_internal_error_message_is_non_empty():
@@ -144,30 +147,31 @@ def test_a2a_internal_error_message_is_sanitized_not_raw():
     """
     from src.a2a_server.adcp_a2a_server import _internal_error_for
 
-    leaky = RuntimeError("SELECT token FROM secret_table -- /var/secrets/db.key")
+    leaky = RuntimeError(RAW_EXCEPTION_LEAK_SENTINEL)
 
     err = _internal_error_for("message processing", leaky)
 
     # The parseable prefix survives (storyboard runners key off it).
     assert err.message.startswith("message processing failed: ")
     # ...but the raw exception text does not reach the wire message.
-    assert "secret_table" not in err.message
-    assert "/var/secrets/db.key" not in err.message
+    assert_no_raw_exception_leak(err.message)
     # The envelope half stays generic too (this was already correct). The code is
     # the WIRE value for INTERNAL_ERROR (derived, not hardcoded: INTERNAL_ERROR is
     # internal-only and normalizes to a wire-standard code).
     assert err.data["adcp_error"]["code"] == to_wire_error_code("INTERNAL_ERROR")
-    assert "secret_table" not in err.data["errors"][0]["message"]
+    assert_no_raw_exception_leak(err.data["errors"][0]["message"])
 
 
 @pytest.mark.asyncio
 async def test_a2a_push_config_endpoint_does_not_leak_raw_exception_to_the_wire():
-    """End-to-end through a real A2A entry point: the wire error carries no raw detail.
+    """Drive a real A2A JSON-RPC handler and assert the *raised* InternalError is sanitized.
 
     The sibling test above pins ``_internal_error_for`` directly; this one drives an
-    actual JSON-RPC method (``on_get_task_push_notification_config``) so the
-    sanitized message is proven to reach the wire through the production path,
-    not just through the helper in isolation.
+    actual JSON-RPC method (``on_get_task_push_notification_config``) through handler
+    dispatch, then reads ``.message`` off the ``InternalError`` it raises. It grades
+    the production dispatch path in process — it does NOT serialize the error to the
+    JSON-RPC wire, so "reaches the wire" is out of scope here (that is graded by the
+    transport-blind wire scenario, tracked separately).
 
     The failure is injected at identity resolution, before any database work, so
     this stays a unit test. That is also the realistic shape: an untyped
@@ -175,27 +179,25 @@ async def test_a2a_push_config_endpoint_does_not_leak_raw_exception_to_the_wire(
     """
     from unittest.mock import MagicMock
 
+    from a2a.types import InternalError
+
     from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 
     handler = AdCPRequestHandler()
     handler._get_auth_token = MagicMock(return_value="a-token")
-    handler._resolve_a2a_identity = MagicMock(
-        side_effect=RuntimeError("SELECT token FROM secret_table -- /var/secrets/db.key")
-    )
+    handler._resolve_a2a_identity = MagicMock(side_effect=RuntimeError(RAW_EXCEPTION_LEAK_SENTINEL))
 
     params = MagicMock()
     params.task_id = "task-1"
     params.get = lambda _k: "cfg-1"
 
-    with pytest.raises(Exception) as exc_info:  # noqa: B017 - shape asserted below
+    with pytest.raises(InternalError) as exc_info:
         await handler.on_get_task_push_notification_config(params, MagicMock())
 
-    raised = exc_info.value
-    wire_message = getattr(raised, "message", None) or str(raised)
+    message = exc_info.value.message
     # Pin that we went through _internal_error_for (not some unrelated failure),
-    # so the leak assertions below are grading the sink we care about.
-    assert wire_message.startswith("get push notification config failed: "), (
-        f"expected the canonical A2A internal-error shape, got {wire_message!r}"
+    # so the leak assertion below is grading the sink we care about.
+    assert message.startswith("get push notification config failed: "), (
+        f"expected the canonical A2A internal-error shape, got {message!r}"
     )
-    assert "secret_table" not in wire_message, f"raw SQL reached the wire: {wire_message!r}"
-    assert "/var/secrets/db.key" not in wire_message, f"raw path reached the wire: {wire_message!r}"
+    assert_no_raw_exception_leak(message)

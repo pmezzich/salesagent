@@ -25,6 +25,33 @@ def assert_no_raw_validation_leak(message: str) -> None:
     assert "errors.pydantic.dev" not in message, f"Pydantic documentation URL leaked into message: {message!r}"
 
 
+# Sensitive markers a raw untyped exception can carry — a SQL keyword, a table
+# name, and a filesystem path — that must never survive sanitization onto the
+# buyer-facing wire. RAW_EXCEPTION_LEAK_SENTINEL embeds all of them so every leak
+# test injects the same raw-exception input, and assert_no_raw_exception_leak
+# checks the same token set. Adding a new marker happens once, here.
+_RAW_EXCEPTION_LEAK_TOKENS: tuple[str, ...] = (
+    "SELECT",
+    "secret_table",
+    "/var/secrets/db.key",
+)
+
+RAW_EXCEPTION_LEAK_SENTINEL = "SELECT token FROM secret_table -- /var/secrets/db.key"
+
+
+def assert_no_raw_exception_leak(message: str) -> None:
+    """Assert a buyer-facing message omits raw untyped-exception internals.
+
+    Mirrors ``assert_no_raw_validation_leak``: the checked-token set lives here in
+    one place so every sink (the untyped-normalization message, the A2A
+    ``_internal_error_for`` message, the A2A push-config endpoint) grades the same
+    markers and no site can silently drop one. Pair with
+    ``RAW_EXCEPTION_LEAK_SENTINEL`` as the injected raw exception text.
+    """
+    for token in _RAW_EXCEPTION_LEAK_TOKENS:
+        assert token not in message, f"raw exception detail leaked into buyer-facing message: {token!r} in {message!r}"
+
+
 def assert_envelope_shape(
     target: Any,
     code: str,
