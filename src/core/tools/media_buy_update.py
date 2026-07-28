@@ -471,7 +471,8 @@ def _update_media_buy_impl(
             # budget / targeting validators below — a package's budget is
             # meaningless if the package does not exist. (The PACKAGE-preempts-
             # BUDGET ordering itself is a reasonable reading but ungraded — no
-            # storyboard pins it.) Spec grounding:
+            # storyboard pins it.) Spec grounding: AdCP 3.1.1 (adcp==6.6.0,
+            # canonical per docs/adcp-spec-version.md) —
             # invalid_transitions.yaml Phase 3 (unknown_package), storyboard
             # scenario "unknown package_id returns PACKAGE_NOT_FOUND" in
             # BR-UC-003-update-media-buy.feature (@source v3.1-04f59d2d5).

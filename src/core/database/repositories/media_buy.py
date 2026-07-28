@@ -293,7 +293,9 @@ class MediaBuyRepository:
         if isinstance(budget_value, dict):
             budget_total = budget_value.get("total")
             pacing_value = budget_value.get("pacing")
-        elif isinstance(budget_value, int | float) and not isinstance(budget_value, bool):
+        elif isinstance(budget_value, int | float):
+            # bool is an int subtype, but a True/False budget is not 1/0 —
+            # _to_decimal_or_none (the single coercion authority) rejects it.
             budget_total = budget_value
 
         return MediaPackage(
