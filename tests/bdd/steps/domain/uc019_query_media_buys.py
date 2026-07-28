@@ -10,7 +10,7 @@ beads: salesagent-lqb
 from __future__ import annotations
 
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pytest_bdd import given, parsers, then, when
 
@@ -22,6 +22,11 @@ from tests.factories import (
     MediaBuyFactory,
     MediaPackageFactory,
 )
+
+if TYPE_CHECKING:
+    from jsonschema.exceptions import ValidationError
+
+    from src.core.schemas._base import GetMediaBuysMediaBuy
 
 # ═══════════════════════════════════════════════════════════════════════
 # Helpers
@@ -1314,7 +1319,7 @@ def _get_media_buys(ctx: dict) -> list:
     return buys or []
 
 
-def _find_single_media_buy(ctx: dict, mb_id: str, expected_status: str | None = None):
+def _find_single_media_buy(ctx: dict, mb_id: str, expected_status: str | None = None) -> GetMediaBuysMediaBuy:
     """Resolve a label and return the SINGLE matching media buy from the response.
 
     Shared matcher for every step that locates one buy by label — one place to
@@ -2537,6 +2542,44 @@ _POST_CREATE_EXPECTED_STATUS = "pending_creatives"
 # Any OTHER discarded top-level key is a wire regression, not framing.
 _KNOWN_ENVELOPE_KEYS = frozenset({"message", "success", "status", "task_id", "context_id"})
 
+# The bundled schema (adcp==6.6.0, _schemas/3.1/bundled/media-buy/...) ships AdCP
+# 3.1 and marks two GetMediaBuys media-buy item fields required that the repo's
+# pinned GetMediaBuysMediaBuy model (a later revision, src/core/schemas/_base.py)
+# does not carry. Tolerate exactly those missing-required errors when validating
+# the wire against the authoritative artifact; every other violation is a real
+# regression. Mirrors the _KNOWN_ENVELOPE_KEYS allowlist above: name the known
+# gap explicitly so the guard stays honest.
+_SCHEMA_DRIFT_REQUIRED = frozenset({"confirmed_at", "revision"})
+
+
+def _load_get_media_buys_response_schema() -> dict:
+    """Load the authoritative bundled AdCP get-media-buys-response JSON Schema.
+
+    adcp==6.6.0 ships it at ``_schemas/3.1/media-buy/get-media-buys-response.json``;
+    the ``bundled`` sibling inlines every ``$ref`` into ``$defs`` so jsonschema
+    validates the document standalone (no resolver/registry needed). Loaded via
+    ``importlib.resources`` so it resolves against the installed wheel regardless
+    of the working directory.
+    """
+    import json
+    from importlib.resources import files
+
+    resource = files("adcp") / "_schemas" / "3.1" / "bundled" / "media-buy" / "get-media-buys-response.json"
+    return json.loads(resource.read_text(encoding="utf-8"))
+
+
+def _missing_required_prop(error: ValidationError) -> str | None:
+    """Return the single property named by a jsonschema ``required`` error.
+
+    jsonschema emits one error per missing required property with the stable
+    message ``"'<prop>' is a required property"`` — parse the property back out so
+    the caller can decide whether it is a tolerated version-drift field.
+    """
+    import re
+
+    match = re.match(r"^'(?P<prop>[^']+)' is a required property$", error.message)
+    return match.group("prop") if match else None
+
 
 @given("the buyer captured a media_buy_id from a successful create_media_buy response")
 def given_buyer_captured_media_buy_id(ctx: dict) -> None:
@@ -2557,8 +2600,20 @@ def given_buyer_captured_media_buy_id(ctx: dict) -> None:
     resp = ctx.get("response")
     assert resp is not None, "create_media_buy returned no response"
     inner = getattr(resp, "response", resp)
-    mb_id = getattr(inner, "media_buy_id", None)
-    assert mb_id, f"create_media_buy response carries no media_buy_id: {inner!r}"
+    # Capture media_buy_id OFF THE WIRE — the id analogue of the status determinism
+    # gate below — so a wire-serialization regression that drops or renames
+    # media_buy_id on the a2a DataPart / mcp structured_content trips here instead
+    # of staying green on the in-process object the poll is keyed on. wire_field's
+    # guard raises if a real-wire transport failed to stash the create wire; the
+    # equality gates the in-process object (which the poll resolves) against what
+    # the create actually serialized.
+    mb_id = wire_field(ctx, "media_buy_id")
+    assert mb_id, f"create_media_buy response carries no media_buy_id on the wire: {inner!r}"
+    inner_id = getattr(inner, "media_buy_id", None)
+    assert inner_id == mb_id, (
+        f"in-process media_buy_id {inner_id!r} diverges from wire media_buy_id {mb_id!r} — "
+        "serialization regression on the graded create→get seam"
+    )
 
     # Pin the expected poll status from the status the CREATE returned ON THE
     # WIRE — not a bare literal — so a create/poll status divergence can't stay
@@ -2597,39 +2652,74 @@ def when_query_captured_media_buy_id(ctx: dict) -> None:
 
 @then("the response should be schema-valid against get-media-buys-response.json")
 def then_response_schema_valid_get_media_buys(ctx: dict) -> None:
-    """Validate the WIRE payload against the pinned GetMediaBuysResponse model.
+    """Validate the wire media buys against the bundled AdCP get-media-buys-response schema.
 
-    The repo ships no standalone JSON schema — the adcp dist publishes no schema
-    dir for the CI-pinned AdCP 3.1.1 (pyproject ``adcp==6.6.0``,
-    tests/unit/test_adcp_spec_version.py, docs/adcp-spec-version.md) — so the
-    pinned Pydantic model is the local schema proxy. Reads the payload through
-    the shared ``wire_dict`` helper: the real ``ctx["wire_response"]`` the buyer
-    received on REST/A2A/MCP (its guard raises if a real-wire transport failed to
-    stash it, rather than silently degrading), or the production serialization of
-    the typed response on IMPL (which round-trips the model but cannot observe a
-    wire serialization regression).
+    adcp==6.6.0 bundles the authoritative JSON Schema — ``_schemas/3.1/media-buy/
+    get-media-buys-response.json`` (title "Get Media Buys Response", top-level
+    ``required: [media_buys]``); the ``bundled`` sibling inlines every ``$ref`` into
+    ``$defs`` so jsonschema validates it standalone. That artifact — not
+    ``GetMediaBuysResponse.model_fields`` — grades the wire here.
+
+    Payload is read through the shared ``wire_dict`` helper: the real
+    ``ctx["wire_response"]`` the buyer received on a2a/mcp (its guard raises if a
+    real-wire transport failed to stash it, rather than silently degrading).
+
+    ``wire_dict`` is the AdCP PAYLOAD, not the transport-wrapped envelope the whole
+    schema models: the schema's top-level composes a Protocol Envelope of
+    context_id/task_id/status the payload does not carry, and the model serializes
+    optional top-level fields (``context``/``errors``) as explicit ``null`` where
+    the schema types them object/array. Validating the whole document against it
+    would fail on that transport/serialization framing, not on media-buy data. So
+    grade the DATA this scenario is about — each wire media buy against the schema's
+    authoritative ``media_buys`` item definition (resolved against the document's
+    ``$defs``) — plus a top-level shape guard below.
+
+    Two item-level ``required`` fields (``confirmed_at``/``revision``) are a known
+    version gap — the bundled schema is AdCP 3.1, while the pinned
+    ``GetMediaBuysMediaBuy`` (src/core/schemas/_base.py) targets a later revision
+    that does not carry them — so those specific missing-required errors are
+    tolerated (``_SCHEMA_DRIFT_REQUIRED``); every OTHER violation on a media buy (a
+    retyped id, a dropped item-level status, a malformed package) fails loud.
     """
+    from jsonschema.validators import Draft7Validator
+
     from src.core.schemas import GetMediaBuysResponse
     from tests.bdd.steps._outcome_helpers import wire_dict
 
-    # wire_dict returns the real wire body on REST/A2A/MCP (its guard raises if a
-    # real-wire transport failed to stash it, rather than silently degrading), and
-    # the production serialization of the typed response on IMPL.
     wire = wire_dict(ctx)
-    model_field_names = set(GetMediaBuysResponse.model_fields)
-    # Transport framing wraps the response object in envelope keys, so validate
-    # the model's own fields as they appear on the wire. But fail loud on any
-    # UNKNOWN discarded top-level key — a wire regression that ADDS a bogus field
-    # would otherwise be silently filtered out and pass unseen.
-    unexpected = set(wire) - model_field_names - _KNOWN_ENVELOPE_KEYS
+
+    # Top-level shape guard. The schema admits extra top-level keys
+    # (``additionalProperties: true``, for envelope framing), so a wire regression
+    # that ADDS a bogus top-level key would pass validation unseen — reject any
+    # top-level key that is neither a GetMediaBuysResponse field nor known envelope
+    # framing. (model_fields is used here for shape, NOT as the validation authority.)
+    known_top_level = set(GetMediaBuysResponse.model_fields) | _KNOWN_ENVELOPE_KEYS
+    unexpected = set(wire) - known_top_level
     assert not unexpected, (
         f"unexpected top-level wire keys {sorted(unexpected)} — neither "
         "GetMediaBuysResponse fields nor known envelope framing; a wire "
         "regression may have added a bogus field"
     )
-    payload = {k: v for k, v in wire.items() if k in model_field_names}
-    assert "media_buys" in payload, f"wire payload carries no media_buys — keys: {sorted(wire)}"
-    GetMediaBuysResponse.model_validate(payload)
+    media_buys = wire.get("media_buys")
+    assert isinstance(media_buys, list), f"wire carries no media_buys array — got {type(media_buys).__name__}"
+
+    # Grade each media buy against the authoritative item schema (declared draft-07,
+    # matching the repo's other schema validators; $defs carried so internal $refs
+    # resolve). Surface every violation EXCEPT the two known version-drift
+    # missing-required fields.
+    schema = _load_get_media_buys_response_schema()
+    item_schema = {**schema["properties"]["media_buys"]["items"], "$defs": schema.get("$defs", {})}
+    validator = Draft7Validator(item_schema)
+    violations = [
+        (idx, err)
+        for idx, media_buy in enumerate(media_buys)
+        for err in validator.iter_errors(media_buy)
+        if not (err.validator == "required" and _missing_required_prop(err) in _SCHEMA_DRIFT_REQUIRED)
+    ]
+    assert not violations, "get-media-buys-response.json schema violations on the wire:\n" + "\n".join(
+        f"  media_buys[{idx}] at /{'/'.join(str(p) for p in err.absolute_path)}: {err.message}"
+        for idx, err in violations
+    )
 
 
 @then("the media_buys array should include the freshly-created buy")
