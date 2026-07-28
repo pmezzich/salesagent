@@ -94,47 +94,42 @@ class TestRESTProductsEndpoint:
             f"spec-valid body should be accepted, got {response.status_code}: {response.text}"
         )
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"brief": "video ads", "buying_mode": "garbage"}, id="out-of-enum-buying-mode"),
+            pytest.param({"brief": "video ads", "not_a_real_field": "x"}, id="undeclared-field"),
+        ],
+    )
     @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
-    def test_out_of_enum_buying_mode_is_rejected_with_the_adcp_envelope(self, mock_resolve, stub_impl):
-        """A buying_mode outside the pinned enum 400s with the two-layer envelope.
+    def test_spec_invalid_body_is_rejected_with_the_adcp_envelope(self, mock_resolve, stub_impl, body):
+        """A spec-invalid body 400s with the two-layer AdCP envelope, not FastAPI's 422.
 
-        get-products-request.json@3.1.1 defines buying_mode as
+        Mirrors the accept parametrize above: both rejection shapes share one oracle
+        (400 + INVALID_REQUEST/correctable envelope), differing only in the request body.
+
+        out-of-enum-buying-mode: get-products-request.json@3.1.1 defines buying_mode as
         enum ["brief","wholesale","refine"], and the UC-001 storyboard grades the
         out-of-enum case as an error (@T-UC-001-partition-buying-mode: unknown_value →
         "buying_mode must be one of enum values"; @T-UC-001-boundary-buying-mode:
         buying_mode='auction' → invalid). Typing the REST field to that Literal makes
-        the boundary reject a non-spec value rather than accept it at 200 — this test
+        the boundary reject a non-spec value rather than accept it at 200 — this row
         is the non-vacuity oracle for that narrowing.
 
-        On REST the rejection surfaces through the same RequestValidationError handler
-        as any structural rejection, so the wire code is INVALID_REQUEST/correctable
-        (the value-vs-structural code split is a repo-wide follow-up, not this PR).
+        undeclared-field: the other half of the buying_mode case and the reason it
+        cannot pass vacuously — it proves extra="forbid" is actually engaged on this
+        route. Without it, a GetProductsBody that had silently fallen back to
+        extra="ignore" would accept buying_mode for the wrong reason and the positive
+        test would still be green. It also backs this module's docstring claim that
+        error responses use the AdCPError format.
+
+        Both surface through the same RequestValidationError handler as any structural
+        rejection, so the wire code is INVALID_REQUEST/correctable (the value-vs-structural
+        code split is a repo-wide follow-up, not this PR).
         """
         response = client.post(
             "/api/v1/products",
-            json={"brief": "video ads", "buying_mode": "garbage"},
-            headers={"Authorization": "Bearer test-token"},
-        )
-
-        assert response.status_code == 400, f"expected 400, got {response.status_code}: {response.text}"
-        assert_envelope_shape(response.json(), "INVALID_REQUEST", recovery="correctable")
-
-    @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
-    def test_undeclared_field_is_rejected_with_the_adcp_envelope(self, mock_resolve, stub_impl):
-        """An undeclared field 400s with the two-layer envelope, not FastAPI's 422.
-
-        This is the other half of the buying_mode test and the reason that one
-        cannot pass vacuously: it proves extra="forbid" is actually engaged on
-        this route. Without it, a GetProductsBody that had silently fallen back
-        to extra="ignore" would accept buying_mode for the wrong reason and the
-        positive test would still be green.
-
-        It also backs this module's docstring claim that error responses use the
-        AdCPError format, which until now no test in the file asserted.
-        """
-        response = client.post(
-            "/api/v1/products",
-            json={"brief": "video ads", "not_a_real_field": "x"},
+            json=body,
             headers={"Authorization": "Bearer test-token"},
         )
 
