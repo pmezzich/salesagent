@@ -22,9 +22,9 @@ from enum import Enum
 from typing import Any
 
 import httpx
-from adcp import get_adcp_spec_version, sign_legacy_webhook
+from adcp import get_adcp_spec_version
 
-from src.core.webhook_body import compact_webhook_body
+from src.core.webhook_body import sign_or_serialize
 
 logger = logging.getLogger(__name__)
 
@@ -442,20 +442,16 @@ class WebhookDeliveryService:
         # Serialize ONCE, before the retry loop, and sign those exact bytes.
         # Byte-equality is the whole contract: signing a sorted-compact
         # re-serialization while httpx re-serialized the body differently (the
-        # old path) made every signature fail raw-body verification.
-        if webhook_secret and self._verify_secret_strength(webhook_secret):
-            signed_headers, body_bytes = sign_legacy_webhook(webhook_secret, payload, timestamp=timestamp)
-            # X-AdCP-Signature: sha256=<hex> + X-AdCP-Timestamp (unix seconds)
-            headers.update(signed_headers)
-        else:
-            if webhook_secret:
-                logger.warning(f"⚠️ Webhook secret for {config.url} is too weak (min 32 characters required)")
-            # No timestamp header on the unsigned branch: replay prevention is a
-            # property of the SIGNATURE, so an unsigned timestamp is unverifiable
-            # decoration. The other two senders emit none, and the all-caps
-            # X-ADCP-Timestamp spelled here also diverged from the SDK's
-            # X-AdCP-Timestamp used on the signed branch above.
-            body_bytes = compact_webhook_body(payload)
+        # old path) made every signature fail raw-body verification. The
+        # unsigned branch emits no timestamp header: replay prevention is a
+        # property of the SIGNATURE, so an unsigned timestamp is unverifiable
+        # decoration (the other two senders emit none, and the all-caps
+        # X-ADCP-Timestamp once spelled here also diverged from the SDK's
+        # X-AdCP-Timestamp on the signed branch).
+        strong_secret = bool(webhook_secret and self._verify_secret_strength(webhook_secret))
+        if webhook_secret and not strong_secret:
+            logger.warning(f"⚠️ Webhook secret for {config.url} is too weak (min 32 characters required)")
+        body_bytes = sign_or_serialize(headers, payload, webhook_secret if strong_secret else None, timestamp=timestamp)
 
         # Add authentication
         if config.authentication_type == "bearer" and config.authentication_token:

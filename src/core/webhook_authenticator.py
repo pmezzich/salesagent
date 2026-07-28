@@ -22,17 +22,21 @@ class WebhookAuthenticator:
 
     @staticmethod
     def verify_signature(
-        payload: str, signature: str, timestamp: str, secret: str, tolerance_seconds: int = 300
+        payload: str | bytes, signature: str, timestamp: str, secret: str, tolerance_seconds: int = 300
     ) -> bool:
         """
         Verify a webhook signature against the RAW request body.
 
-        ``payload`` must be the raw HTTP body exactly as received (decoded
-        text) — re-parsing and re-serializing the JSON before verification
-        breaks the byte-equality contract and rejects valid signatures.
+        ``payload`` must be the raw HTTP body exactly as received — re-parsing
+        and re-serializing the JSON before verification breaks the byte-equality
+        contract and rejects valid signatures. ``bytes`` (e.g. ``request.body``)
+        is accepted and decoded as UTF-8 internally, matching
+        ``WebhookVerifier._verify_signature`` so both receiver references take
+        the same input.
 
         Args:
-            payload: The raw payload string (exact received bytes, decoded)
+            payload: The raw payload (exact received bytes as ``bytes``, or the
+                already-decoded text)
             signature: The signature from the X-AdCP-Signature header (with
                 "sha256=" prefix)
             timestamp: The unix-seconds timestamp from X-AdCP-Timestamp
@@ -42,6 +46,9 @@ class WebhookAuthenticator:
         Returns:
             True if signature is valid, False otherwise
         """
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8")
+
         # Check timestamp to prevent replay attacks
         try:
             webhook_time = int(timestamp)

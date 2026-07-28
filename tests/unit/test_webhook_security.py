@@ -15,6 +15,7 @@ from src.core.webhook_validator import (
     WebhookURLValidator,
     validate_webhook_task_type,
 )
+from tests.helpers.webhook_hmac import assert_hmac_over_transmitted_bytes
 
 
 class TestValidateWebhookTaskType:
@@ -135,7 +136,13 @@ class TestWebhookURLValidator:
 
 
 class TestWebhookAuthenticator:
-    """Test HMAC-SHA256 webhook authentication."""
+    """The byte-equality signing contract and ``WebhookAuthenticator.verify_signature``.
+
+    Signing now lives in the SDK (``sign_legacy_webhook``); the salesagent code
+    under test here is the receiver-side ``verify_signature`` reference. The one
+    signer test that stays grades the #1441 byte-equality CONTRACT through the
+    shared assertion — generic HMAC properties of the SDK are the SDK's to test.
+    """
 
     def test_sign_legacy_webhook_headers_and_byte_equality(self):
         """The canonical signer emits spec headers and signs the exact bytes it returns.
@@ -149,35 +156,7 @@ class TestWebhookAuthenticator:
 
         headers, body_bytes = sign_legacy_webhook(secret, payload)
 
-        assert headers["X-AdCP-Signature"].startswith("sha256=")
-        assert headers["X-AdCP-Timestamp"].isdigit()
-        expected = hmac.new(
-            secret.encode("utf-8"),
-            headers["X-AdCP-Timestamp"].encode("utf-8") + b"." + body_bytes,
-            hashlib.sha256,
-        ).hexdigest()
-        assert headers["X-AdCP-Signature"] == f"sha256={expected}"
-
-    def test_sign_legacy_webhook_timestamp_in_signature(self):
-        """Same payload+secret with different timestamps signs differently."""
-        payload = {"event": "test"}
-        secret = "secret"
-
-        headers1, _ = sign_legacy_webhook(secret, payload, timestamp=1_720_000_000)
-        headers2, _ = sign_legacy_webhook(secret, payload, timestamp=1_720_000_001)
-
-        assert headers1["X-AdCP-Timestamp"] != headers2["X-AdCP-Timestamp"]
-        # Signatures differ (timestamp is part of the signed message)
-        assert headers1["X-AdCP-Signature"] != headers2["X-AdCP-Signature"]
-
-    def test_sign_legacy_webhook_with_different_secrets(self):
-        """Different secrets should produce different signatures."""
-        payload = {"event": "test"}
-
-        headers1, _ = sign_legacy_webhook("secret1", payload, timestamp=1_720_000_000)
-        headers2, _ = sign_legacy_webhook("secret2", payload, timestamp=1_720_000_000)
-
-        assert headers1["X-AdCP-Signature"] != headers2["X-AdCP-Signature"]
+        assert_hmac_over_transmitted_bytes(secret, body_bytes, headers, cross_check_receivers=False)
 
     def test_verify_signature_valid(self):
         """Should verify valid signature."""

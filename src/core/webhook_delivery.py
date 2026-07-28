@@ -16,10 +16,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 import requests
-from adcp import sign_legacy_webhook
 
 from src.core.database.database_session import get_db_session
-from src.core.webhook_body import compact_webhook_body
+from src.core.webhook_body import sign_or_serialize
 from src.core.webhook_validator import WebhookURLValidator
 
 logger = logging.getLogger(__name__)
@@ -111,11 +110,7 @@ def deliver_webhook_with_retry(delivery: WebhookDelivery) -> tuple[bool, dict[st
     # prefix / X-AdCP-Timestamp) instead of the legacy X-Webhook-*.
     headers = delivery.headers.copy()
     headers.setdefault("Content-Type", "application/json")
-    if delivery.signing_secret:
-        signed_headers, body_bytes = sign_legacy_webhook(delivery.signing_secret, delivery.payload)
-        headers.update(signed_headers)
-    else:
-        body_bytes = compact_webhook_body(delivery.payload)
+    body_bytes = sign_or_serialize(headers, delivery.payload, delivery.signing_secret)
 
     # Track delivery attempts
     attempts = 0

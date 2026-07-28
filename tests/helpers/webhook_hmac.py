@@ -22,6 +22,18 @@ SIGNATURE_HEADER = "x-adcp-signature"
 TIMESTAMP_HEADER = "x-adcp-timestamp"
 
 
+def sign_over_transmitted_bytes(secret: str, body: bytes, timestamp: str) -> str:
+    """Return the hex HMAC-SHA256 for the legacy signed message ``{timestamp}.{body}``.
+
+    The produce half of the byte-equality contract: the exact digest a sender
+    must place (``sha256=``-prefixed) in ``X-AdCP-Signature`` for *body*
+    transmitted verbatim. Kept next to the verify assertion so sender-side
+    recompute in tests has one home and cannot drift from what this module
+    verifies.
+    """
+    return hmac.new(secret.encode("utf-8"), timestamp.encode("utf-8") + b"." + body, hashlib.sha256).hexdigest()
+
+
 def assert_hmac_over_transmitted_bytes(
     secret: str,
     body: bytes,
@@ -57,7 +69,7 @@ def assert_hmac_over_transmitted_bytes(
     signature = raw_signature.removeprefix("sha256=")
     assert len(signature) == 64, f"HMAC-SHA256 hex digest is 64 chars, got {len(signature)}: {signature!r}"
 
-    expected = hmac.new(secret.encode("utf-8"), timestamp.encode("utf-8") + b"." + body, hashlib.sha256).hexdigest()
+    expected = sign_over_transmitted_bytes(secret, body, timestamp)
     assert signature == expected, (
         "HMAC does not verify over the transmitted raw bytes -- the sender signed "
         "something other than what it put on the wire"
@@ -67,9 +79,9 @@ def assert_hmac_over_transmitted_bytes(
         from src.core.webhook_authenticator import WebhookAuthenticator
         from src.services.webhook_verification import verify_adcp_webhook
 
-        assert WebhookAuthenticator.verify_signature(
-            body.decode("utf-8"), lowered[SIGNATURE_HEADER], timestamp, secret
-        ), "WebhookAuthenticator rejected a signature that verifies by hand"
+        assert WebhookAuthenticator.verify_signature(body, lowered[SIGNATURE_HEADER], timestamp, secret), (
+            "WebhookAuthenticator rejected a signature that verifies by hand"
+        )
         assert verify_adcp_webhook(secret, body, headers), (
             "verify_adcp_webhook rejected a signature that verifies by hand"
         )

@@ -40,7 +40,7 @@ def _parse_json_list(text: str) -> list[str]:
     return json.loads(text)
 
 
-def _parse_call_payload(call) -> dict:
+def _parse_call_payload(call: Any) -> dict[str, Any]:
     """Parse one mocked POST call's payload from its wire bytes (or legacy json=)."""
     kwargs = call[1]
     payload = kwargs.get("json")
@@ -2114,7 +2114,7 @@ def then_skip_no_webhook(ctx: dict, mb_id: str) -> None:
     post_mock = env.mock["post"]
     # Collect all media_buy_ids that received webhook POSTs
     posted_mb_ids = [
-        _parse_call_payload(call).get("media_buy_id") for call in post_mock.call_args_list if _parse_call_payload(call)
+        payload.get("media_buy_id") for call in post_mock.call_args_list if (payload := _parse_call_payload(call))
     ]
     assert real_id not in posted_mb_ids, (
         f"Webhook POST was made for '{real_id}' but it should have been skipped "

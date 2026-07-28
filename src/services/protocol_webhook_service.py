@@ -23,7 +23,7 @@ from uuid import uuid4
 
 import requests
 from a2a.types import Task, TaskStatusUpdateEvent
-from adcp import extract_webhook_result_data, sign_legacy_webhook
+from adcp import extract_webhook_result_data
 from adcp.types import McpWebhookPayload
 from google.protobuf.json_format import MessageToDict
 
@@ -32,7 +32,7 @@ from src.core.database.database_session import get_db_session
 from src.core.database.models import PushNotificationConfig
 from src.core.database.repositories.delivery import DeliveryRepository
 from src.core.lifecycle import register_shutdown
-from src.core.webhook_body import compact_webhook_body
+from src.core.webhook_body import sign_or_serialize
 
 logger = logging.getLogger(__name__)
 
@@ -188,21 +188,18 @@ class ProtocolWebhookService:
         # MUST be the exact bytes that go on the wire — signing one
         # serialization and letting the HTTP client re-serialize another
         # (the old ``json=payload`` path) invalidates every signature.
+        sign_secret = (
+            push_notification_config.authentication_token
+            if push_notification_config.authentication_type == "HMAC-SHA256"
+            else None
+        )
+        body_bytes = sign_or_serialize(headers, payload_dict, sign_secret)
         if (
-            push_notification_config.authentication_type == "HMAC-SHA256"
+            not sign_secret
+            and push_notification_config.authentication_type == "Bearer"
             and push_notification_config.authentication_token
         ):
-            signed_headers, body_bytes = sign_legacy_webhook(
-                push_notification_config.authentication_token, payload_dict
-            )
-            headers.update(signed_headers)
-        else:
-            body_bytes = compact_webhook_body(payload_dict)
-            if (
-                push_notification_config.authentication_type == "Bearer"
-                and push_notification_config.authentication_token
-            ):
-                headers["Authorization"] = f"Bearer {push_notification_config.authentication_token}"
+            headers["Authorization"] = f"Bearer {push_notification_config.authentication_token}"
 
         # Send notification with retry logic and logging
         return await self._send_with_retry_and_logging(

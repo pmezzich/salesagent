@@ -13,8 +13,6 @@ disagree on the same webhook.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 from datetime import UTC, datetime
 
@@ -27,13 +25,14 @@ from src.services.webhook_verification import (
     WebhookVerifier,
     verify_adcp_webhook,
 )
+from tests.helpers.webhook_hmac import sign_over_transmitted_bytes
 
 SECRET = "verifier-unit-secret-0123456789abcdef"  # 32+ chars
 PAYLOAD = {"zeta": "caf\u00e9", "alpha": 250.0, "nested": {"b": 1, "a": 2}}
 
 
 def _sign(body: bytes, timestamp: str) -> str:
-    return hmac.new(SECRET.encode("utf-8"), timestamp.encode("utf-8") + b"." + body, hashlib.sha256).hexdigest()
+    return sign_over_transmitted_bytes(SECRET, body, timestamp)
 
 
 def _now_unix() -> str:
