@@ -18,25 +18,24 @@ coverage of the skill-boundary refusal. MCP rejects the same shape via its typed
 ``list[CreativeAsset]`` signature (type-enforced, not wire-pinned); REST still
 defaults ``assets={}`` via ``_creative_asset_from_wire_dict`` and accepts. That
 REST/A2A-raw-vs-MCP/A2A-skill divergence, and whether a schema-invalid item should
-ride back per-item instead, is a separate cross-transport reconciliation, not this
+ride back per-item instead, is a separate cross-transport reconciliation — the
+transport-blind ``BR-UC-006`` assets-required scenario tracked in issue #1731 (which
+also fixes ``CreativeSyncEnv.call_a2a`` to drive the real skill handler) — not this
 guard's subject. This guard exists so the lenient ``assets`` default is never
 reintroduced at the A2A skill boundary, where it would silently move that path off
-both MCP and the schema.
+both MCP and the schema; it is removed in the same change that lands #1731.
 """
 
 import logging
-from unittest.mock import MagicMock
 
 import pytest
 from a2a.server.routes.common import ServerCallContext
 from a2a.types import SendMessageRequest, Task, TaskState
 
-from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from tests.helpers import assert_envelope_shape
 from tests.utils.a2a_helpers import (
     create_a2a_message_with_skill,
     extract_data_from_artifact,
-    make_a2a_identity,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
@@ -45,18 +44,13 @@ logger = logging.getLogger(__name__)
 
 
 @pytest.mark.asyncio
-async def test_sync_creatives_rejects_creative_without_assets_over_a2a(sample_tenant, sample_principal):
+async def test_sync_creatives_rejects_creative_without_assets_over_a2a(seamed_a2a_handler, sample_tenant):
     """A url-shaped creative (no ``assets``) draws a structured VALIDATION_ERROR.
 
     Deletion oracle: default ``assets`` at the boundary (e.g. route the dict through
     the impl's lenient ``_creative_asset_from_wire_dict``) and the request stops
     failing — the ``TASK_STATE_FAILED`` and envelope assertions below both go red.
     """
-    handler = AdCPRequestHandler()
-    identity = make_a2a_identity(sample_tenant, sample_principal)
-    handler._get_auth_token = MagicMock(return_value=sample_principal["access_token"])
-    handler._resolve_a2a_identity = MagicMock(return_value=identity)
-
     from src.core.config_loader import set_current_tenant
 
     set_current_tenant(sample_tenant)
@@ -70,7 +64,7 @@ async def test_sync_creatives_rejects_creative_without_assets_over_a2a(sample_te
         "url": "https://example.com/banner.jpg",
     }
     message = create_a2a_message_with_skill(skill_name="sync_creatives", parameters={"creatives": [creative]})
-    result = await handler.on_message_send(SendMessageRequest(message=message), ServerCallContext())
+    result = await seamed_a2a_handler.on_message_send(SendMessageRequest(message=message), ServerCallContext())
 
     assert isinstance(result, Task)
     assert result.status.state == TaskState.TASK_STATE_FAILED, (
