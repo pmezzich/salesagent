@@ -97,7 +97,10 @@ class TestWebhookEnvContract:
             success, result = env.call_deliver(signing_secret="test-secret")
 
             assert success is True
-            # Verify POST was called with signature headers
+            # Verify POST was called with spec-format signature headers, graded
+            # through the one shared helper (this site was presence-only: no
+            # sha256=-prefix, no unix-seconds).
+            from tests.helpers.webhook_hmac import assert_signature_headers_present
+
             call_kwargs = env.mock["post"].call_args.kwargs
-            headers_lower = {k.lower(): v for k, v in call_kwargs["headers"].items()}
-            assert "x-adcp-signature" in headers_lower
+            assert_signature_headers_present(call_kwargs["headers"])

@@ -34,6 +34,50 @@ def sign_over_transmitted_bytes(secret: str, body: bytes, timestamp: str) -> str
     return hmac.new(secret.encode("utf-8"), timestamp.encode("utf-8") + b"." + body, hashlib.sha256).hexdigest()
 
 
+def assert_signature_headers_present(headers: Mapping[str, str]) -> tuple[str, str]:
+    """Assert the AdCP signature/timestamp headers are present and spec-formatted.
+
+    The format-only half of the byte-equality contract -- everything gradable
+    WITHOUT the secret or the raw body: both headers present, the signature
+    ``sha256=``-prefixed over a 64-char hex digest, and the timestamp unix
+    seconds. Callers that also hold the secret and raw bytes should prefer
+    :func:`assert_hmac_over_transmitted_bytes`, which layers digest
+    verification on top of these same checks.
+
+    This is the ONE home for the format contract: presence-only, sig-prefix-only,
+    and isdigit-only copies had forked across the webhook suites, so a sender
+    emitting a bare-hex signature or an ISO timestamp could stay green in the
+    looser copies while the helper-based suites went red. Grading every site
+    through here keeps the contract identical everywhere.
+
+    Args:
+        headers: Response/request headers; looked up case-insensitively, since
+            ``requests``/``httpx``/``BaseHTTPRequestHandler`` each normalize
+            header casing differently.
+
+    Returns:
+        The ``(signature_hex, timestamp)`` pair -- signature with the
+        ``sha256=`` prefix stripped -- so a caller adding digest verification
+        need not re-lower or re-strip.
+    """
+    lowered = {k.lower(): v for k, v in headers.items()}
+
+    assert SIGNATURE_HEADER in lowered, f"missing {SIGNATURE_HEADER}; got {sorted(lowered)}"
+    assert TIMESTAMP_HEADER in lowered, f"missing {TIMESTAMP_HEADER}; got {sorted(lowered)}"
+
+    raw_signature = lowered[SIGNATURE_HEADER]
+    timestamp = lowered[TIMESTAMP_HEADER]
+
+    # Each of these was asserted by SOME copy of this block and not others.
+    assert raw_signature.startswith("sha256="), f"spec signature header is sha256=-prefixed, got {raw_signature!r}"
+    assert timestamp.isdigit(), f"spec timestamp is unix seconds, got {timestamp!r}"
+
+    signature = raw_signature.removeprefix("sha256=")
+    assert len(signature) == 64, f"HMAC-SHA256 hex digest is 64 chars, got {len(signature)}: {signature!r}"
+
+    return signature, timestamp
+
+
 def assert_hmac_over_transmitted_bytes(
     secret: str,
     body: bytes,
@@ -54,20 +98,7 @@ def assert_hmac_over_transmitted_bytes(
             ``verify_adcp_webhook``) and require they agree. Defaults on;
             disable only where a caller has no real transport.
     """
-    lowered = {k.lower(): v for k, v in headers.items()}
-
-    assert SIGNATURE_HEADER in lowered, f"missing {SIGNATURE_HEADER}; got {sorted(lowered)}"
-    assert TIMESTAMP_HEADER in lowered, f"missing {TIMESTAMP_HEADER}; got {sorted(lowered)}"
-
-    raw_signature = lowered[SIGNATURE_HEADER]
-    timestamp = lowered[TIMESTAMP_HEADER]
-
-    # Each of these was asserted by SOME copy of this block and not others.
-    assert raw_signature.startswith("sha256="), f"spec signature header is sha256=-prefixed, got {raw_signature!r}"
-    assert timestamp.isdigit(), f"spec timestamp is unix seconds, got {timestamp!r}"
-
-    signature = raw_signature.removeprefix("sha256=")
-    assert len(signature) == 64, f"HMAC-SHA256 hex digest is 64 chars, got {len(signature)}: {signature!r}"
+    signature, timestamp = assert_signature_headers_present(headers)
 
     expected = sign_over_transmitted_bytes(secret, body, timestamp)
     assert signature == expected, (
@@ -79,7 +110,7 @@ def assert_hmac_over_transmitted_bytes(
         from src.core.webhook_authenticator import WebhookAuthenticator
         from src.services.webhook_verification import verify_adcp_webhook
 
-        assert WebhookAuthenticator.verify_signature(body, lowered[SIGNATURE_HEADER], timestamp, secret), (
+        assert WebhookAuthenticator.verify_signature(body, signature, timestamp, secret), (
             "WebhookAuthenticator rejected a signature that verifies by hand"
         )
         assert verify_adcp_webhook(secret, body, headers), (

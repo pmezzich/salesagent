@@ -21,7 +21,7 @@ from pytest_bdd import given, parsers, then, when
 from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.bdd.steps.generic.then_error import _get_error_message
 from tests.bdd.steps.generic.then_payload import register_boundary_handler
-from tests.helpers.webhook_hmac import assert_hmac_over_transmitted_bytes
+from tests.helpers.webhook_hmac import assert_hmac_over_transmitted_bytes, assert_signature_headers_present
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -70,11 +70,14 @@ def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
     """Extract the JSON payload (parsed) from the most recent webhook POST call."""
     mock_post = ctx["env"].mock["post"]
     assert mock_post.called, "No webhook POST was made"
-    call_kwargs = mock_post.call_args_list[-1][1]  # kwargs of last call
-    payload = call_kwargs.get("json")
-    if payload is None:
-        payload = json.loads(_get_last_webhook_body_bytes(ctx))
-    assert payload, f"Webhook POST had no JSON payload: {call_kwargs}"
+    last_call = mock_post.call_args_list[-1]
+    # Delegate to the one json-else-bytes parser (:_parse_call_payload) instead
+    # of re-rolling it: the hand-rolled copy ended in ``assert payload``
+    # (truthiness), which wrongly rejected a legitimately-empty ``{}`` body that
+    # test_harness_delivery_webhook.py::test_empty_payload_is_not_replaced_with_default
+    # proves is real. Guard on None so the empty dict is accepted.
+    payload = _parse_call_payload(last_call)
+    assert payload is not None, f"Webhook POST had no JSON payload: {last_call[1]}"
     return payload
 
 
@@ -84,6 +87,20 @@ def _get_last_webhook_headers(ctx: dict) -> dict[str, str]:
     assert mock_post.called, "No webhook POST was made"
     call_kwargs = mock_post.call_args_list[-1][1]
     return call_kwargs.get("headers", {})
+
+
+def _ci_header(ctx: dict, header: str) -> str:
+    """Return the last webhook POST's value for *header*, matched case-insensitively.
+
+    ``requests``/``httpx``/``BaseHTTPRequestHandler`` each normalize header
+    casing differently, so the Gherkin-named header is resolved against a
+    lowered copy. Asserts the header is present (this preamble was previously
+    duplicated verbatim across the HMAC/timestamp Then steps).
+    """
+    all_headers = _get_last_webhook_headers(ctx)
+    value = {k.lower(): v for k, v in all_headers.items()}.get(header.lower())
+    assert value is not None, f"Expected header {header!r} but got: {list(all_headers)}"
+    return value
 
 
 def _collect_all_packages(resp: Any) -> list[Any]:
@@ -1930,33 +1947,31 @@ def then_config_accepted(ctx: dict) -> None:
 
 @then(parsers.parse('the request should include header "{header}" with hex-encoded HMAC'))
 def then_hmac_header(ctx: dict, header: str) -> None:
-    """Assert HMAC header is present (case-insensitive) with a hex signature."""
-    headers = {k.lower(): v for k, v in _get_last_webhook_headers(ctx).items()}
-    value = headers.get(header.lower())
-    assert value is not None, f"Expected header {header!r} but got: {list(_get_last_webhook_headers(ctx))}"
-    # The spec header format is ``sha256=<hex>``. ``removeprefix`` alone (the
-    # earlier version) silently no-ops on a bare-hex value, so this scenario
-    # accepted a signature the three helper-based suites reject — the BDD
-    # layer graded the same contract more loosely than the unit layer.
-    assert value.startswith("sha256="), f"spec signature header is sha256=-prefixed, got {value!r}"
-    stripped = value.removeprefix("sha256=")
-    # {64}, not {1,}: HMAC-SHA256 is a fixed-width 64-char hex digest, so a
-    # truncated or malformed signature must not satisfy this step.
-    assert re.match(r"^[0-9a-f]{64}$", stripped), f"Header {header!r} is not a hex-encoded HMAC: {value!r}"
+    """Assert the Gherkin-named header carries a spec-format hex HMAC signature.
+
+    The ``sha256=``-prefix / 64-hex format contract is graded through the shared
+    ``assert_signature_headers_present`` (tests/helpers/webhook_hmac.py) so the
+    BDD layer cannot fork it looser than the unit/integration suites; the local
+    ``_ci_header`` check ties the assertion to the header the scenario names.
+    """
+    value = _ci_header(ctx, header)
+    assert value.startswith("sha256="), f"header {header!r} is not a sha256=-prefixed HMAC: {value!r}"
+    assert_signature_headers_present(_get_last_webhook_headers(ctx))
 
 
 @then(parsers.parse('the request should include header "{header}" with unix timestamp'))
 def then_timestamp_header(ctx: dict, header: str) -> None:
-    """Assert timestamp header is present and is unix seconds (AdCP spec).
+    """Assert the Gherkin-named header carries a unix-seconds timestamp (AdCP spec).
 
     The legacy-HMAC signed message is ``{unix_timestamp}.{raw_body}``, so the
     header carries unix seconds — the earlier ISO form never matched a
-    spec-compliant verifier (#1441).
+    spec-compliant verifier (#1441). Graded through the shared
+    ``assert_signature_headers_present`` so the unix-seconds check cannot be
+    present in some copies and absent in others.
     """
-    headers = {k.lower(): v for k, v in _get_last_webhook_headers(ctx).items()}
-    value = headers.get(header.lower())
-    assert value is not None, f"Expected header {header!r} but got: {list(_get_last_webhook_headers(ctx))}"
-    assert value.isdigit(), f"Header {header!r} is not a unix-seconds timestamp: {value!r}"
+    value = _ci_header(ctx, header)
+    assert value.isdigit(), f"header {header!r} is not a unix-seconds timestamp: {value!r}"
+    assert_signature_headers_present(_get_last_webhook_headers(ctx))
 
 
 @then('the HMAC should be computed over "timestamp.payload" concatenation')
@@ -3336,7 +3351,7 @@ def _call_webhook_service(
     return env.call_send(**kwargs)
 
 
-def _get_webhook_payload(ctx: dict) -> dict:
+def _get_webhook_payload(ctx: dict) -> dict[str, Any]:
     """Extract the JSON payload from the most recent webhook POST call."""
     env = ctx["env"]
     call_args = env.mock["post"].call_args

@@ -279,13 +279,13 @@ class TestSendWebhookEnhancedHmacSigning:
             assert result is True
             post_mock = env.mock["client"].return_value.__enter__.return_value.post
             post_mock.assert_called_once()
-            sent_headers = post_mock.call_args.kwargs["headers"]
-            # HTTP headers are case-insensitive on the wire; the adcp signer
-            # emits X-AdCP-* casing.
-            headers_lower = {k.lower(): v for k, v in sent_headers.items()}
-            assert "x-adcp-signature" in headers_lower
-            assert headers_lower["x-adcp-signature"].startswith("sha256=")
-            assert headers_lower["x-adcp-timestamp"].isdigit()  # unix seconds per spec
+            # Presence + sha256=-prefix + unix-seconds format graded through the
+            # one shared helper so this site can't fork looser than the others.
+            # Byte-equality (secret+body) is the sibling
+            # test_hmac_signature_valid_reproduces_from_payload's job.
+            from tests.helpers.webhook_hmac import assert_signature_headers_present
+
+            assert_signature_headers_present(post_mock.call_args.kwargs["headers"])
 
     def test_hmac_signature_valid_reproduces_from_payload(self, integration_db):
         """The HMAC signature can be reproduced using the same secret and payload.

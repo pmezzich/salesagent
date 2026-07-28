@@ -54,11 +54,13 @@ class TestWebhookDeliveryHappyPath:
             call_args = env.mock["post"].call_args
             assert call_args.args[0] == "https://buyer.example.com/webhook"
 
-            # Verify HMAC signature headers were added (spec names via the
-            # adcp signer; case-insensitive on the wire)
-            sent_headers = {k.lower(): v for k, v in call_args.kwargs["headers"].items()}
-            assert "x-adcp-signature" in sent_headers
-            assert "x-adcp-timestamp" in sent_headers
+            # Verify HMAC signature headers were added, graded through the one
+            # shared helper (presence + sha256=-prefix + unix-seconds) so this
+            # site can't stay green on a bare-hex sig or ISO timestamp that the
+            # helper-based suites reject.
+            from tests.helpers.webhook_hmac import assert_signature_headers_present
+
+            assert_signature_headers_present(call_args.kwargs["headers"])
 
             # Verify payload was sent
             sent_payload = json.loads(call_args.kwargs["data"])
@@ -457,10 +459,11 @@ class TestEXT_G_06_HmacAuthRejection:
                 object_id="mb_001",
             )
 
-            sent_headers = {k.lower(): v for k, v in env.mock["post"].call_args[1]["headers"].items()}
-            assert "x-adcp-signature" in sent_headers
-            assert sent_headers["x-adcp-signature"].startswith("sha256=")
-            assert "x-adcp-timestamp" in sent_headers
+            # Full format contract via the one shared helper (this site had
+            # skipped the timestamp isdigit check).
+            from tests.helpers.webhook_hmac import assert_signature_headers_present
+
+            assert_signature_headers_present(env.mock["post"].call_args[1]["headers"])
 
     def test_auth_rejection_vs_server_error_retry_behavior(self, integration_db):
         """Contrast: 401 does NOT retry, but 500 DOES retry.
