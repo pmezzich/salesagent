@@ -6,6 +6,7 @@ These fixtures are for tests that require database and service integration.
 
 import os
 import uuid
+from contextlib import contextmanager
 from datetime import UTC, date, datetime
 
 import psycopg2
@@ -27,6 +28,28 @@ from tests.integration.migration_helpers import parse_postgres_url
 
 # integration_db fixture moved to tests/conftest_db.py (visible to all test suites including tests/bdd/)
 # It is available here via tests/conftest.py -> from tests.conftest_db import *
+
+
+@contextmanager
+def bind_factory_session(factory, session):
+    """Temporarily bind a factory-boy ``factory`` to ``session``, restoring the
+    previously-bound session on exit.
+
+    Legacy integration tests that seed with a raw ORM ``session`` rather than
+    ``IntegrationEnv`` (which binds the factories) must (a) bind the factory to
+    the caller's open session so a FK to a not-yet-committed row resolves in the
+    same transaction, and (b) restore the SAVED prior binding in a ``finally``:
+    ``IntegrationEnv.__enter__`` asserts the factory session is ``None`` before
+    binding, so a leaked binding fails whichever ``IntegrationEnv``-based test
+    runs next in the same worker. Restores to the saved value, never to ``None``
+    — the invariant several hand-rolled copies of this idiom re-derive per site.
+    """
+    previous_session = factory._meta.sqlalchemy_session
+    factory._meta.sqlalchemy_session = session
+    try:
+        yield factory
+    finally:
+        factory._meta.sqlalchemy_session = previous_session
 
 
 def cleanup_tenant(tenant_id: str) -> None:

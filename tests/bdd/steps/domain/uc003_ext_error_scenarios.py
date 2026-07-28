@@ -259,18 +259,21 @@ def given_package_update_no_id(ctx: dict) -> None:
 def given_package_not_in_media_buy(ctx: dict, package_id: str) -> None:
     """Ensure no package with the given package_id exists in the media buy.
 
-    Declarative guard — verifies the package is NOT present. The harness
-    setup creates pkg_001 by default, so this step is valid for any other ID.
+    Declarative guard — verifies the package is NOT present in EITHER store
+    ``package_exists_or_raise`` consults: the ``media_packages`` rows AND
+    ``MediaBuy.raw_request``. Asserting only the rows table would leave the
+    guard's second input (raw_request) unproven. The harness setup creates
+    pkg_001 by default, so this step is valid for any other ID.
     """
     mb = ctx.get("existing_media_buy")
     assert mb is not None, "No existing_media_buy in ctx"
     existing_pkg = ctx.get("existing_package")
     if existing_pkg and existing_pkg.package_id == package_id:
         raise AssertionError(f"Package '{package_id}' DOES exist in media buy — step claims it shouldn't")
-    # Verify via DB
+    # Verify via DB — against both stores package_exists_or_raise reads.
     from sqlalchemy import select
 
-    from src.core.database.models import MediaPackage
+    from src.core.database.models import MediaBuy, MediaPackage
 
     with db_session(ctx) as session:
         db_pkg = session.scalars(
@@ -281,6 +284,16 @@ def given_package_not_in_media_buy(ctx: dict, package_id: str) -> None:
         ).first()
         assert db_pkg is None, (
             f"Package '{package_id}' found in DB for media buy '{mb.media_buy_id}' — step claims it does not exist"
+        )
+        # The guard also consults MediaBuy.raw_request (pre-dual-write buys, or
+        # adapters that returned an empty response.packages) — prove the package
+        # is absent there too, not just from the rows table.
+        db_mb = session.scalars(select(MediaBuy).filter_by(media_buy_id=mb.media_buy_id)).first()
+        raw_packages = (db_mb.raw_request or {}).get("packages", []) if db_mb is not None else []
+        raw_ids = [p.get("package_id") for p in raw_packages if isinstance(p, dict)]
+        assert package_id not in raw_ids, (
+            f"Package '{package_id}' found in MediaBuy.raw_request for media buy "
+            f"'{mb.media_buy_id}' — step claims it does not exist"
         )
 
 
@@ -978,10 +991,10 @@ def _send_storyboard_update(ctx: dict, extra: dict[str, Any] | None = None) -> N
     """Attach a correlation context, then dispatch via the canonical When step.
 
     The request carries context.correlation_id so the Then step can assert
-    the seller echoes it unchanged in the error envelope. Contract:
-    AdCP 3.1.0-beta.3, dist/compliance/3.1.0-beta.3/protocols/media-buy/
-    scenarios/invalid_transitions.yaml (``path: context.correlation_id``,
-    "returned unchanged").
+    the seller echoes it unchanged in the error envelope. Contract: AdCP 3.1.1
+    (adcp==6.6.0, canonical per docs/adcp-spec-version.md) —
+    invalid_transitions.yaml (``path: context.correlation_id``, "returned
+    unchanged").
     """
     kwargs = _ensure_update_defaults(ctx)
     if extra:

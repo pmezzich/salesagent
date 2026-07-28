@@ -273,37 +273,54 @@ class MediaBuyRepository:
         if raw_pkg is None:
             return None
 
-        package = self._build_package_row(media_buy_id, package_id, raw_pkg)
+        package = self._build_package_row(
+            media_buy_id,
+            package_id,
+            dict(raw_pkg),
+            budget=raw_pkg.get("budget"),
+            bid_price=raw_pkg.get("bid_price"),
+        )
         self._session.add(package)
         self._session.flush()
         return package
 
     @staticmethod
-    def _build_package_row(media_buy_id: str, package_id: str, raw_pkg: dict[str, Any]) -> MediaPackage:
-        """Build a ``MediaPackage`` row from a raw_request package dict.
+    def _build_package_row(
+        media_buy_id: str,
+        package_id: str,
+        package_config: dict[str, Any],
+        *,
+        budget: Any = None,
+        bid_price: Any = None,
+    ) -> MediaPackage:
+        """Build a ``MediaPackage`` row for the dual-write, in ONE place.
 
-        Single home for the dual-write construction (budget dict → total/pacing,
-        ``Decimal(str(...))`` coercion, row build). ``materialize_package`` uses
-        it; the create-side dual-write sites (``media_buy_create.py``, under
-        their FIXME) can route through it as follow-up so the copies converge.
+        Single home for the dual-write construction shared by
+        ``materialize_package`` (legacy raw_request path) and the create-side
+        sites (``media_buy_create.py`` — resolves #1736): the budget dict →
+        total/pacing split, the bool-rejecting / non-500 ``_to_decimal_or_none``
+        coercion, and the row build. ``budget`` is the raw budget value (a dict
+        with ``total``/``pacing``, a bare scalar, or ``None``); ``bid_price`` is
+        the raw scalar bid price — sourced from ``pricing_info`` at the create
+        sites, from the raw package on the legacy path. A future coercion fix
+        lands here and reaches every caller instead of drifting past the copies.
         """
-        budget_value = raw_pkg.get("budget")
         budget_total = None
         pacing_value = None
-        if isinstance(budget_value, dict):
-            budget_total = budget_value.get("total")
-            pacing_value = budget_value.get("pacing")
-        elif isinstance(budget_value, int | float):
+        if isinstance(budget, dict):
+            budget_total = budget.get("total")
+            pacing_value = budget.get("pacing")
+        elif isinstance(budget, int | float):
             # bool is an int subtype, but a True/False budget is not 1/0 —
             # _to_decimal_or_none (the single coercion authority) rejects it.
-            budget_total = budget_value
+            budget_total = budget
 
         return MediaPackage(
             media_buy_id=media_buy_id,
             package_id=package_id,
-            package_config=dict(raw_pkg),
+            package_config=package_config,
             budget=_to_decimal_or_none(budget_total),
-            bid_price=_to_decimal_or_none(raw_pkg.get("bid_price")),
+            bid_price=_to_decimal_or_none(bid_price),
             pacing=pacing_value,
         )
 

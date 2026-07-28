@@ -113,7 +113,6 @@ from src.core.context_manager import get_context_manager
 from src.core.database.models import AdapterConfig, CurrencyLimit, MediaBuy
 from src.core.database.models import Creative as DBCreative
 from src.core.database.models import CreativeAssignment as DBAssignment
-from src.core.database.models import MediaPackage as DBMediaPackage
 from src.core.database.models import Principal as ModelPrincipal
 from src.core.database.models import Product as ModelProduct
 from src.core.database.models import Product as ProductModel
@@ -2921,6 +2920,8 @@ async def _create_media_buy_impl(
             # This enables the UI to display packages and creative assignments to work properly
             with MediaBuyUoW(tenant["tenant_id"]) as pkg_uow:
                 # FIXME(salesagent-9f2): package creation should use repository methods
+                from src.core.database.repositories.media_buy import MediaBuyRepository
+
                 assert pkg_uow.session is not None
                 session = pkg_uow.session
                 for pkg_obj in pending_packages:
@@ -2975,30 +2976,17 @@ async def _create_media_buy_impl(
                             )
                             break
 
-                    # Extract pricing fields for dual-write
-                    budget_total = None
-                    if budget_value:
-                        if isinstance(budget_value, dict):
-                            budget_total = budget_value.get("total")
-                        elif isinstance(budget_value, (int, float)):
-                            budget_total = float(budget_value)
-
-                    bid_price_value = None
-                    pacing_value = None
-                    if pricing_info_for_package:
-                        bid_price_value = pricing_info_for_package.get("bid_price")
-                    if budget_value and isinstance(budget_value, dict):
-                        pacing_value = budget_value.get("pacing")
-
-                    # Create MediaPackage with dual-write: dedicated columns + JSON
-                    db_package = DBMediaPackage(
-                        media_buy_id=media_buy_id,
-                        package_id=pkg_obj.package_id,
-                        package_config=package_config,
-                        # Dual-write: populate dedicated columns
-                        budget=Decimal(str(budget_total)) if budget_total is not None else None,
-                        bid_price=Decimal(str(bid_price_value)) if bid_price_value is not None else None,
-                        pacing=pacing_value,
+                    # Dual-write via the shared repository builder so the budget
+                    # dict → total/pacing split and the bool-rejecting / non-500
+                    # _to_decimal_or_none coercion live in ONE place (resolves
+                    # #1736). bid_price is sourced from pricing_info here.
+                    bid_price_value = pricing_info_for_package.get("bid_price") if pricing_info_for_package else None
+                    db_package = MediaBuyRepository._build_package_row(
+                        media_buy_id,
+                        pkg_obj.package_id,
+                        package_config,
+                        budget=budget_value,
+                        bid_price=bid_price_value,
                     )
                     session.add(db_package)
 
@@ -3665,6 +3653,8 @@ async def _create_media_buy_impl(
         if req.packages or (response.packages and len(response.packages) > 0):
             with MediaBuyUoW(tenant["tenant_id"]) as auto_pkg_uow:
                 # FIXME(salesagent-9f2): package creation should use repository methods
+                from src.core.database.repositories.media_buy import MediaBuyRepository
+
                 assert auto_pkg_uow.session is not None
                 session = auto_pkg_uow.session
                 # Persist the adapter-reported packages (they carry the
@@ -3714,31 +3704,18 @@ async def _create_media_buy_impl(
                         "impressions": impressions,  # Store impressions for display
                     }
 
-                    # Extract pricing fields for dual-write from adapter response
-                    budget_total = None
+                    # Dual-write via the shared repository builder so the budget
+                    # dict → total/pacing split and the bool-rejecting / non-500
+                    # _to_decimal_or_none coercion live in ONE place (resolves
+                    # #1736). bid_price is sourced from pricing_info here.
                     budget_data = getattr(resp_package, "budget", None)
-                    if budget_data:
-                        if isinstance(budget_data, dict):
-                            budget_total = budget_data.get("total")
-                        elif isinstance(budget_data, (int, float)):
-                            budget_total = float(budget_data)
-
-                    bid_price_value = None
-                    pacing_value = None
-                    if pricing_info_for_package:
-                        bid_price_value = pricing_info_for_package.get("bid_price")
-                    if budget_data and isinstance(budget_data, dict):
-                        pacing_value = budget_data.get("pacing")
-
-                    # Create MediaPackage with dual-write: dedicated columns + JSON
-                    db_package = DBMediaPackage(
-                        media_buy_id=response.media_buy_id,
-                        package_id=resp_package_id,
-                        package_config=package_config,
-                        # Dual-write: populate dedicated columns
-                        budget=Decimal(str(budget_total)) if budget_total is not None else None,
-                        bid_price=Decimal(str(bid_price_value)) if bid_price_value is not None else None,
-                        pacing=pacing_value,
+                    bid_price_value = pricing_info_for_package.get("bid_price") if pricing_info_for_package else None
+                    db_package = MediaBuyRepository._build_package_row(
+                        response.media_buy_id,
+                        resp_package_id,
+                        package_config,
+                        budget=budget_data,
+                        bid_price=bid_price_value,
                     )
                     session.add(db_package)
 
