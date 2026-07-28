@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.core.exceptions import (
-    WIRE_STANDARD_CODES,
+    GENERIC_INTERNAL_ERROR_MESSAGE,
     AdCPValidationError,
     normalize_to_adcp_error,
     to_wire_error_code,
@@ -85,11 +85,47 @@ def test_untyped_exception_message_is_generic_not_raw():
 
     normalized = normalize_to_adcp_error(leaky)
 
-    generic = WIRE_STANDARD_CODES[to_wire_error_code("INTERNAL_ERROR")]["message"]
     assert normalized.error_code == "INTERNAL_ERROR"
-    assert normalized.message == generic
+    assert normalized.message == GENERIC_INTERNAL_ERROR_MESSAGE
     assert "secret_table" not in normalized.message
     assert "SELECT" not in normalized.message
+
+
+def test_generic_internal_error_message_is_non_empty():
+    """The buyer-facing generic INTERNAL_ERROR message is never a blank string.
+
+    The wire ``message`` field is schema-required but has no minimum length, so an
+    empty string would be schema-valid. Non-emptiness is a stricter repo choice;
+    pin it once, here at the constant's definition, so the per-sink tests can
+    assert plain equality against it without re-litigating emptiness tautologically.
+    """
+    assert GENERIC_INTERNAL_ERROR_MESSAGE
+    assert GENERIC_INTERNAL_ERROR_MESSAGE.strip()
+
+
+def test_normalize_is_a_pure_mapping_and_does_not_log(caplog):
+    """``normalize_to_adcp_error`` is a pure type→AdCPError mapping with no logging
+    side effect.
+
+    Server-side capture of the raw untyped exception is the transport boundary's
+    job: every boundary passes the raw exception to ``record_boundary_error``
+    (MCP ``_handle_tool_exception``; A2A ``on_message_send``, the skill loop, and
+    the four push-config methods), which logs the untyped fallthrough with
+    ``exc_info``. Logging inside this helper — invoked at every boundary — would
+    double-log there. Deletion oracle: restoring ``logger.error(...)`` in the sink
+    reddens this.
+    """
+    import logging
+
+    leaky = RuntimeError("SELECT token FROM secret_table -- /var/secrets/db.key")
+
+    with caplog.at_level(logging.DEBUG, logger="src.core.exceptions"):
+        normalize_to_adcp_error(leaky)
+
+    assert caplog.records == [], (
+        f"normalize_to_adcp_error is a pure mapping and must not log; it emitted "
+        f"{[r.getMessage() for r in caplog.records]!r}"
+    )
 
 
 def test_a2a_internal_error_message_is_sanitized_not_raw():

@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from src.core.exceptions import (
+    GENERIC_INTERNAL_ERROR_MESSAGE,
     AdCPAdapterError,
     AdCPError,
     AdCPNotFoundError,
@@ -422,10 +423,7 @@ class TestA2ADispatcherFailedSkillResult:
         assert env["errors"][0]["code"] == "SERVICE_UNAVAILABLE"
         # The raw RuntimeError text must NOT reach the buyer (#1587): the wire
         # carries the generic wire-standard message, never str(exc).
-        from src.core.exceptions import WIRE_STANDARD_CODES, to_wire_error_code
-
-        generic = WIRE_STANDARD_CODES[to_wire_error_code("INTERNAL_ERROR")]["message"]
-        assert env["errors"][0]["message"] == generic
+        assert env["errors"][0]["message"] == GENERIC_INTERNAL_ERROR_MESSAGE
         assert "unexpected boom" not in env["errors"][0]["message"]
 
     def test_exception_with_empty_message_uses_generic_wire_message(self):
@@ -434,14 +432,15 @@ class TestA2ADispatcherFailedSkillResult:
         exception class name (#1587). Preserves the spec's non-empty-message guarantee.
         """
         from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
-        from src.core.exceptions import WIRE_STANDARD_CODES, to_wire_error_code
 
         result = AdCPRequestHandler._build_failed_skill_result("get_products", RuntimeError())
 
         env = result["error_envelope"]
-        generic = WIRE_STANDARD_CODES[to_wire_error_code("INTERNAL_ERROR")]["message"]
-        assert env["errors"][0]["message"] == generic
-        assert env["errors"][0]["message"]  # non-empty
+        # Non-emptiness of the wire message is pinned once, at the constant's
+        # definition (test_exception_normalization.py::test_generic_internal_error_
+        # message_is_non_empty). Re-asserting it here after the == equality would be
+        # tautological — the constant is a fixed non-empty value.
+        assert env["errors"][0]["message"] == GENERIC_INTERNAL_ERROR_MESSAGE
 
     def test_envelope_shape_matches_typed_branch(self):
         """Untyped fallthrough produces the SAME envelope shape as the typed branch.

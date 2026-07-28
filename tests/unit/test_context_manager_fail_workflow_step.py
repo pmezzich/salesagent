@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.core.context_manager import ContextManager
-from src.core.exceptions import AdCPValidationError
+from src.core.exceptions import GENERIC_INTERNAL_ERROR_MESSAGE, AdCPValidationError
 
 
 def _new_ctx_manager_with_mocked_update() -> tuple[ContextManager, MagicMock]:
@@ -92,9 +92,6 @@ class TestFailWorkflowStepForExceptionWebhookPayload:
         Recovery is transient — the pinned enumMetadata classification of the
         SERVICE_UNAVAILABLE wire code (salesagent-nr2q).
         """
-        from src.core.exceptions import WIRE_STANDARD_CODES, to_wire_error_code
-
-        generic = WIRE_STANDARD_CODES[to_wire_error_code("INTERNAL_ERROR")]["message"]
         cm, mock_update = _new_ctx_manager_with_mocked_update()
 
         cm.audit_workflow_step_failure("step_abc", RuntimeError("kaboom"))
@@ -104,14 +101,13 @@ class TestFailWorkflowStepForExceptionWebhookPayload:
         mock_update.assert_called_once_with(
             "step_abc",
             status="failed",
-            error_message=generic,
-            response_data=_expected_response_data("SERVICE_UNAVAILABLE", generic, recovery="transient"),
+            error_message=GENERIC_INTERNAL_ERROR_MESSAGE,
+            response_data=_expected_response_data(
+                "SERVICE_UNAVAILABLE", GENERIC_INTERNAL_ERROR_MESSAGE, recovery="transient"
+            ),
         )
 
     def test_empty_exception_message_uses_generic_wire_message(self):
-        from src.core.exceptions import WIRE_STANDARD_CODES, to_wire_error_code
-
-        generic = WIRE_STANDARD_CODES[to_wire_error_code("INTERNAL_ERROR")]["message"]
         cm, mock_update = _new_ctx_manager_with_mocked_update()
 
         cm.audit_workflow_step_failure("step_abc", RuntimeError())
@@ -121,8 +117,10 @@ class TestFailWorkflowStepForExceptionWebhookPayload:
         mock_update.assert_called_once_with(
             "step_abc",
             status="failed",
-            error_message=generic,
-            response_data=_expected_response_data("SERVICE_UNAVAILABLE", generic, recovery="transient"),
+            error_message=GENERIC_INTERNAL_ERROR_MESSAGE,
+            response_data=_expected_response_data(
+                "SERVICE_UNAVAILABLE", GENERIC_INTERNAL_ERROR_MESSAGE, recovery="transient"
+            ),
         )
 
 

@@ -1070,6 +1070,13 @@ def build_validation_error_details(errors: Sequence[Mapping[str, Any]]) -> dict[
     }
 
 
+# The single buyer-facing generic message for the untyped INTERNAL_ERROR
+# fallthrough. Named here so the value the production sink emits and the value
+# the deletion-oracle tests assert against are one symbol that cannot drift —
+# a rename of the code key or message field moves both at once.
+GENERIC_INTERNAL_ERROR_MESSAGE = WIRE_STANDARD_CODES[to_wire_error_code("INTERNAL_ERROR")]["message"]
+
+
 def normalize_to_adcp_error(exc: Exception) -> AdCPError:
     """Normalize untyped exceptions to typed AdCPError subclasses.
 
@@ -1097,7 +1104,11 @@ def normalize_to_adcp_error(exc: Exception) -> AdCPError:
     # An untyped exception's str() can carry SQL fragments, table names, or
     # filesystem paths (SQLAlchemy/OS errors). build_two_layer_error_envelope
     # forwards the message verbatim to the wire envelope and the A2A failed-Task
-    # webhook body, so only a generic message may reach the buyer. Log the raw
-    # detail server-side; return the wire-standard message for the code.
-    logger.error("Unhandled %s normalized to INTERNAL_ERROR", type(exc).__name__, exc_info=exc)
-    return AdCPError(WIRE_STANDARD_CODES[to_wire_error_code("INTERNAL_ERROR")]["message"])
+    # webhook body, so only a generic message may reach the buyer. The raw detail
+    # is captured server-side at the transport boundary — every boundary passes
+    # the raw exception to record_boundary_error (MCP _handle_tool_exception; A2A
+    # on_message_send, the skill loop, and the four push-config methods), which
+    # logs the untyped fallthrough with exc_info. This helper is a pure mapping
+    # invoked at every boundary; logging here would double-log (record_boundary_
+    # error already fired) and give every future caller a silent log write.
+    return AdCPError(GENERIC_INTERNAL_ERROR_MESSAGE)
