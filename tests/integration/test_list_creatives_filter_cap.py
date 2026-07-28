@@ -8,12 +8,15 @@ test_list_creatives_auth.py.
 """
 
 import typing
+from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp import CreativeFilters
 
+from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from src.core.exceptions import AdCPValidationError
 from src.core.tools.creatives.listing import _CAPPED_FILTER_FIELDS, _MAX_FILTER_LIST_LEN
+from tests.factories.principal import PrincipalFactory
 from tests.harness import CreativeListEnv
 from tests.harness.transport import Transport
 from tests.helpers import assert_envelope_shape
@@ -80,6 +83,10 @@ class TestListCreativesFilterCap:
                 recovery="correctable",
                 message_substr="concept_ids",
             )
+            # Pin the wire field label: the cap raises with the bare param name
+            # (field=field), never a synthetic filters.<x> path the client never sent.
+            assert envelope["errors"][0]["field"] == "concept_ids"
+            assert envelope["adcp_error"]["field"] == "concept_ids"
 
     @pytest.mark.parametrize("transport", _ALL_WIRE)
     def test_over_cap_flat_media_buy_ids_rejected_on_wire(self, integration_db, transport):
@@ -109,6 +116,48 @@ class TestListCreativesFilterCap:
                 recovery="correctable",
                 message_substr="media_buy_ids",
             )
+            # Flat top-level media_buy_ids is labeled with the bare param name it was
+            # sent under (field=field), not a synthetic filters.media_buy_ids path.
+            assert envelope["errors"][0]["field"] == "media_buy_ids"
+            assert envelope["adcp_error"]["field"] == "media_buy_ids"
+
+
+_A2A_IDENTITY = PrincipalFactory.make_identity(
+    principal_id="test_principal", tenant_id="test_tenant", tenant={"tenant_id": "test_tenant"}, protocol="a2a"
+)
+
+
+@pytest.mark.asyncio
+async def test_a2a_list_creatives_handler_forwards_projection_and_enrichment_params():
+    """The A2A list_creatives skill handler forwards every projection/enrichment param.
+
+    ``list_creatives_raw`` accepts ``fields`` / ``include_performance`` /
+    ``include_assignments`` / ``include_sub_assets`` (listing.py:606-609) and the REST
+    route forwards all four (api_v1.py:449-452). The A2A skill handler previously passed
+    none of them, so an A2A client asking for a field projection, performance metrics,
+    package assignments, or sub-assets silently got the defaults. This pins that the
+    handler now forwards all four with the values the client sent.
+    """
+    handler = AdCPRequestHandler()
+    with patch("src.a2a_server.adcp_a2a_server.core_list_creatives_tool") as mock_core_tool:
+        mock_core_tool.return_value = MagicMock()
+        parameters = {
+            "fields": ["creative_id", "name"],
+            "include_performance": True,
+            "include_assignments": True,
+            "include_sub_assets": True,
+        }
+
+        await handler._handle_list_creatives_skill(parameters, _A2A_IDENTITY)
+
+    # call_count + call_args.kwargs rather than a bare assert_called_once() + call_args,
+    # which the weak-mock-assertion guard forbids as a new violation.
+    assert mock_core_tool.call_count == 1
+    call_kwargs = mock_core_tool.call_args.kwargs
+    assert call_kwargs["fields"] == ["creative_id", "name"]
+    assert call_kwargs["include_performance"] is True
+    assert call_kwargs["include_assignments"] is True
+    assert call_kwargs["include_sub_assets"] is True
 
 
 def test_capped_fields_stay_in_parity_with_sdk_list_fields():

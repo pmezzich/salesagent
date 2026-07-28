@@ -102,7 +102,7 @@ def _enforce_filter_list_caps(structured_filters: "CreativeFilters | None") -> N
         if values is not None and len(values) > _MAX_FILTER_LIST_LEN:
             raise AdCPValidationError(
                 f"The {field} filter has {len(values)} entries; the maximum is {_MAX_FILTER_LIST_LEN}.",
-                field=f"filters.{field}",
+                field=field,
                 suggestion=f"Send at most {_MAX_FILTER_LIST_LEN} values in {field}, or narrow the query.",
             )
 
