@@ -19,7 +19,6 @@ from src.core.tools.creatives.listing import _CAPPED_FILTER_FIELDS, _MAX_FILTER_
 from tests.factories.principal import PrincipalFactory
 from tests.harness import CreativeListEnv
 from tests.harness.transport import Transport
-from tests.helpers import assert_envelope_shape
 
 # Wire transports only — IMPL has no wire envelope. The cap raises from
 # _enforce_filter_list_caps inside _build_list_creatives_request, a
@@ -64,62 +63,51 @@ class TestListCreativesFilterCap:
         assert response.query_summary.total_matching == 0
 
     @pytest.mark.parametrize("transport", _ALL_WIRE)
-    def test_over_cap_concept_ids_emits_validation_envelope(self, integration_db, transport):
-        """Over-cap structured filter surfaces the spec VALIDATION_ERROR envelope
-        on every wire transport (Error Verification Policy: grade the wire, not
-        the reconstructed exception)."""
-        with CreativeListEnv() as env:
-            env.setup_default_data()
-            result = env.call_via(
-                transport,
-                filters={"concept_ids": [f"c-{i}" for i in range(_MAX_FILTER_LIST_LEN + 1)]},
-            )
+    @pytest.mark.parametrize(
+        ("call_kwargs", "expected_field"),
+        [
+            pytest.param(
+                {"filters": {"concept_ids": [f"c-{i}" for i in range(_MAX_FILTER_LIST_LEN + 1)]}},
+                "concept_ids",
+                id="structured-concept_ids",
+            ),
+            pytest.param(
+                {"media_buy_ids": [f"mb-{i}" for i in range(_MAX_FILTER_LIST_LEN + 1)]},
+                "media_buy_ids",
+                id="flat-media_buy_ids",
+            ),
+        ],
+    )
+    def test_over_cap_filter_emits_validation_envelope(self, integration_db, transport, call_kwargs, expected_field):
+        """Over-cap list filter -> spec VALIDATION_ERROR envelope on every wire transport.
 
-            envelope = result.wire_error_envelope
-            assert envelope is not None, f"{transport}: no wire error envelope captured"
-            assert_envelope_shape(
-                envelope,
-                "VALIDATION_ERROR",
-                recovery="correctable",
-                message_substr="concept_ids",
-            )
-            # Pin the wire field label: the cap raises with the bare param name
-            # (field=field), never a synthetic filters.<x> path the client never sent.
-            assert envelope["errors"][0]["field"] == "concept_ids"
-            assert envelope["adcp_error"]["field"] == "concept_ids"
+        Two entry paths, one behavior (the cap runs on the MERGED filters, so both
+        reach it):
 
-    @pytest.mark.parametrize("transport", _ALL_WIRE)
-    def test_over_cap_flat_media_buy_ids_rejected_on_wire(self, integration_db, transport):
-        """FLAT list params are capped too — the cap runs on the MERGED filters.
+        * ``structured-concept_ids`` — an over-cap value inside the structured
+          ``filters`` object.
+        * ``flat-media_buy_ids`` — a flat top-level list param. Merge-placement
+          oracle: with the cap checked only on the pre-merge ``filters`` argument
+          (the original implementation), 101 flat ``media_buy_ids`` reach the
+          ``IN (...)`` expansion and this case fails with a 200-style success
+          instead of the envelope.
 
-        Oracle for the merge placement: with the cap checked only on the
-        pre-merge ``filters`` argument (the original implementation), a flat
-        ``media_buy_ids`` list of 101 entries reaches the query and this test
-        fails with a 200-style success instead of the envelope.
-
-        The flat ``media_buy_ids`` path reaches the merged filters and the
-        ``IN (...)`` expansion on all three wire transports, so grade it on each
-        (A2A/MCP/REST), not REST alone.
+        The wire ``field`` is the bare param name the client actually sent
+        (``field=field`` at listing.py:105), never a synthetic ``filters.<x>``
+        path. Assertion is routed through the harness-guarded ``assert_wire_error``
+        (recovery defaults to the pinned AdCP enum; ``field=`` pins both envelope
+        layers) rather than hand-indexing the envelope. (Error Verification Policy:
+        grade the wire, not the reconstructed exception.)
         """
         with CreativeListEnv() as env:
             env.setup_default_data()
-            result = env.call_via(
-                transport,
-                media_buy_ids=[f"mb-{i}" for i in range(_MAX_FILTER_LIST_LEN + 1)],
-            )
-
-            envelope = result.wire_error_envelope
-            assert envelope is not None, f"{transport}: no wire error envelope captured for flat media_buy_ids"
-            assert_envelope_shape(
-                envelope,
+            result = env.call_via(transport, **call_kwargs)
+            result.assert_wire_error(
                 "VALIDATION_ERROR",
-                recovery="correctable",
-                message_substr="media_buy_ids",
+                require_suggestion=True,
+                message_substr=expected_field,
+                field=expected_field,
             )
-            # Flat top-level media_buy_ids is labeled with the bare param name it was
-            # sent under (field=field), not a synthetic filters.media_buy_ids path.
-            assert envelope["errors"][0]["field"] == "media_buy_ids"
-            assert envelope["adcp_error"]["field"] == "media_buy_ids"
 
 
 _A2A_IDENTITY = PrincipalFactory.make_identity(
