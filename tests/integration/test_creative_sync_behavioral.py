@@ -500,23 +500,37 @@ class TestCreativeValidation:
         shape the sibling per-item wire tests read via ``_wire_entries`` (see
         ``test_orphan_assignment_error_surfaces_as_failed_result_on_wire``).
 
-        Two distinct wire codes are graded off the one payload:
+        THREE distinct failure branches are graded off the one payload — every
+        per-item code this PR moved off the default ``SERVICE_UNAVAILABLE``:
 
-        * ``c_bad`` (empty name) — an already-wire-standard ``VALIDATION_ERROR``
-          (``_sync.py:180``), read through ``_assert_correctable_wire_entry``.
-        * ``c_bad_format`` — the ``except AdCPError`` branch that forwards a TYPED
-          exception code (``code=e.error_code``, ``_sync.py:363``) through
-          ``_failed_sync_result`` -> ``to_wire_error_code``. Driving a real
-          ``AdCPFormatNotFoundError`` grades the ``FORMAT_NOT_FOUND`` ->
-          ``INVALID_REQUEST`` normalization choke point ON THE WIRE: that raw code
-          is internal-only (``INTERNAL_CODES``) and advisory ``errors[]`` serialize
-          verbatim without passing the boundary translator, so a regression that
-          dropped the normalization would leak ``FORMAT_NOT_FOUND`` to the buyer.
+        * ``c_bad`` (empty name) — the OUTER ``except AdCPError`` branch
+          (``code=e.error_code``, ``_sync.py:363``). Empty name passes
+          ``Creative(**schema_data)`` (``name`` carries no length constraint) and
+          is raised as a business-rule ``AdCPValidationError`` at
+          ``_validation.py:95``, whose ``e.error_code`` is the already-wire-
+          standard ``VALIDATION_ERROR``. Read through
+          ``_assert_correctable_wire_entry``.
+        * ``c_bad_format`` — the SAME outer ``except AdCPError`` branch
+          (``code=e.error_code``, ``_sync.py:363``) but forwarding a TYPED code
+          that is NOT wire-standard. Driving a real ``AdCPFormatNotFoundError``
+          grades the ``FORMAT_NOT_FOUND`` -> ``INVALID_REQUEST`` normalization
+          choke point ON THE WIRE: that raw code is internal-only
+          (``INTERNAL_CODES``) and advisory ``errors[]`` serialize verbatim
+          without passing the boundary translator, so a regression that dropped
+          the normalization would leak ``FORMAT_NOT_FOUND`` to the buyer.
           Previously this half was pinned only by ``call_impl`` and the direct
           ``to_wire_error_code`` unit call. Read through
           ``_assert_format_not_found_normalized_on_wire``.
+        * ``c_prov`` — the INNER ``except (ValidationError, ValueError)`` branch
+          (``_sync.py:180``), the OTHER branch this PR moved off
+          ``SERVICE_UNAVAILABLE``. A creative that is valid per the buyer-facing
+          schema but fails the internal ``Creative(**schema_data)`` construction
+          (``provenance`` omits the internally-required ``digital_source_type``)
+          lands here with ``code="VALIDATION_ERROR"``. Previously pinned only by
+          ``call_impl`` (``test_pydantic_schema_failure_uses_correctable_code``);
+          graded on the wire here. Read through ``_assert_correctable_wire_entry``.
 
-        Both wire read-backs go through ``_assert_failed_wire_entry`` because
+        The three wire read-backs go through ``_assert_failed_wire_entry`` because
         ``recovery`` is a plain JSON string here, not the SDK ``Recovery`` enum the
         in-process helper compares by ``.value``.
 
@@ -556,6 +570,17 @@ class TestCreativeValidation:
                         name="Bad Format",
                         format_id=AdcpFormatId(agent_url=DEFAULT_AGENT_URL, id=missing_format_id),
                     ),
+                    # Valid per the buyer-facing schema but fails the internal
+                    # Creative(**schema_data) construction: provenance omits the
+                    # internally-required digital_source_type. Drives the inner
+                    # except (ValidationError, ValueError) branch (_sync.py:180)
+                    # onto the wire. Fails before the format check, so the
+                    # get_format side_effect never sees it.
+                    _make_creative_asset(
+                        creative_id="c_prov",
+                        name="Bad Provenance",
+                        provenance={"created_time": "2026-01-01T00:00:00Z"},
+                    ),
                 ],
             )
 
@@ -581,6 +606,17 @@ class TestCreativeValidation:
                 f"not be dropped: {result.wire_response}"
             )
             _assert_format_not_found_normalized_on_wire(format_entry)
+
+            # Pydantic-construction half: the OTHER branch this PR moved off
+            # SERVICE_UNAVAILABLE — the inner except (ValidationError, ValueError)
+            # (_sync.py:180), reached when Creative(**schema_data) fails. Graded on
+            # the wire here, not only via call_impl.
+            prov_entry = entries.get("c_prov")
+            assert prov_entry is not None, (
+                f"the pydantic-construction-failure creative must appear on the {transport.value} wire, "
+                f"not be dropped: {result.wire_response}"
+            )
+            _assert_correctable_wire_entry(prov_entry)
 
     def test_pydantic_schema_failure_uses_correctable_code(self, integration_db):
         """The OTHER failure branch — a creative that fails PYDANTIC construction —
