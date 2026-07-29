@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from src.core.resolved_identity import ResolvedIdentity
 
+from adcp import BuyingMode
 from adcp.types import BrandReference
 from adcp.types.generated_poc.media_buy.get_media_buy_delivery_request import (
     AttributionWindow,
@@ -70,28 +71,23 @@ class GetProductsBody(SalesAgentBaseModel):
     # dict BrandReference or string domain/URL shorthand (#1324)
     brand: dict[str, Any] | str | None = None
     filters: dict[str, Any] | None = None
-    # buying_mode is the sole entry in the required array of
-    # get-products-request at the pinned spec (3.1.1), so a spec-valid client
-    # always sends it and REST must not reject it — declared here because
-    # extra="forbid" 400s an undeclared field in dev/CI.
+    # buying_mode is the sole entry in the required array of get-products-request at the
+    # pinned spec (3.1.1), so a spec-valid client always sends it. It must be declared on
+    # every transport that forbids unknown fields: under dev/CI extra="forbid" an undeclared
+    # buying_mode 400s here, and the MCP get_products tool now declares it too
+    # (src/core/tools/products.py:800) so FastMCP's additionalProperties: false no longer
+    # rejects it. A2A accepts any unknown field, so its acceptance is not evidence of support.
     #
-    # Deliberately not justified as MCP/A2A parity: MCP does NOT accept this
-    # field in dev/CI. The registered get_products tool advertises
-    # additionalProperties: false over [brand, brief, context, filters,
-    # property_list], so it rejects buying_mode with VALIDATION_ERROR
-    # ("Unexpected keyword argument") and accepts it only under the
-    # production-gated unknown-field strip. A2A does return success, but it
-    # accepts any unknown field, so that is not evidence of support either.
-    #
-    # Typed to the pinned enum, not str: get-products-request.json@3.1.1 defines
-    # buying_mode as enum ["brief","wholesale","refine"], and the UC-001 storyboard
-    # grades the out-of-enum case as an error (@T-UC-001-partition-buying-mode /
-    # @T-UC-001-boundary-buying-mode), so the REST boundary rejects a non-spec value
-    # instead of accepting "garbage" at 200. Literal[...] is a subtype of str, so it
-    # still assigns cleanly into the internal GetProductsRequest (which widens the
-    # field to str|None) if it were ever threaded — narrowing the boundary here does
-    # not fork the internal contract. No transport acts on the value yet.
-    buying_mode: Literal["brief", "wholesale", "refine"] | None = None
+    # Typed to adcp.BuyingMode — the StrEnum of ["brief","wholesale","refine"] the SDK
+    # generates from the same get-products-request.json@3.1.1 — not a hand-written Literal.
+    # The SDK enum is the single source shared with the MCP boundary, so an adcp bump that
+    # adds a mode updates both transports at once instead of leaving two transcribed Literals
+    # to drift and 400 a now-spec-valid value. The UC-001 storyboard grades the out-of-enum
+    # case as an error (@T-UC-001-partition-buying-mode / @T-UC-001-boundary-buying-mode), so
+    # the boundary rejects a non-spec value instead of accepting "garbage" at 200. BuyingMode
+    # subclasses str, so a member still assigns cleanly into the internal GetProductsRequest
+    # (str|None) if it were ever threaded. Accept-and-ignore: no transport acts on it yet.
+    buying_mode: BuyingMode | None = None
     adcp_version: str = "1.0.0"
 
 

@@ -7,10 +7,10 @@ shared implementation pattern from CLAUDE.md.
 import logging
 import os
 import time
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, cast
 
 # FIXME(#1388): FormatId, ProductFilters have local subclasses; import from src.core.schemas (Pattern #7/#4).
-from adcp import FormatId, ProductFilters
+from adcp import BuyingMode, FormatId, ProductFilters
 from adcp import GetProductsRequest as GetProductsRequestGenerated
 from adcp import Product as LibraryProduct
 from adcp.types import BrandReference, ContextObject, PropertyListReference
@@ -790,14 +790,15 @@ async def get_products(
     # pinned spec (3.1.1), so a spec-valid client always sends it. It must be DECLARED on
     # the MCP tool schema: FastMCP advertises additionalProperties: false, so an undeclared
     # buying_mode 400s (VALIDATION_ERROR, "Unexpected keyword argument") in dev/CI — the same
-    # required field REST had to declare. Typed to the pinned enum (get-products-request.json
-    # @3.1.1 defines buying_mode as enum ["brief","wholesale","refine"]), not str, so the
-    # boundary rejects a non-spec value instead of accepting it. Accept-and-ignore, mirroring
-    # the REST GetProductsBody field (src/routes/api_v1.py:94): declared so a conformant client
-    # isn't rejected, but not forwarded to _impl — no transport acts on the value yet. Wiring it
+    # required field REST had to declare. Typed to adcp.BuyingMode — the StrEnum of
+    # ["brief","wholesale","refine"] the SDK generates from get-products-request.json@3.1.1 —
+    # the single source shared with the REST GetProductsBody field (src/routes/api_v1.py:90)
+    # so the two boundaries and the SDK can't drift; the boundary rejects a non-spec value
+    # instead of accepting it. Accept-and-ignore: declared so a conformant client isn't
+    # rejected, but not forwarded to _impl — no transport acts on the value yet. Wiring it
     # across the transports and binding BR-UC-001 is deferred to #1730.
     buying_mode: Annotated[
-        Literal["brief", "wholesale", "refine"] | None,
+        BuyingMode | None,
         Field(
             description="Buyer intent per adcp 3.1.1: 'brief' (publisher curates), 'wholesale' (raw catalog), or 'refine'"
         ),
