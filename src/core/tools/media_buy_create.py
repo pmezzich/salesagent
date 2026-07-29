@@ -26,8 +26,6 @@ from sqlalchemy.orm import selectinload
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
-    from src.core.database.repositories.media_buy import MediaBuyRepository
-
 from adcp import PushNotificationConfig
 from adcp.server.helpers import valid_actions_for_status
 from adcp.types import AccountReference, BrandReference, ContextObject, MediaBuyStatus, ReportingWebhook
@@ -41,6 +39,7 @@ from rich.console import Console
 
 from src.core.database.repositories.creative import CreativeRepository
 from src.core.database.repositories.idempotency_attempt import DEFAULT_REPLAY_TTL
+from src.core.database.repositories.media_buy import MediaBuyRepository
 from src.core.exceptions import (
     AdCPAdapterError,
     AdCPAuthorizationError,
@@ -2920,8 +2919,6 @@ async def _create_media_buy_impl(
             # This enables the UI to display packages and creative assignments to work properly
             with MediaBuyUoW(tenant["tenant_id"]) as pkg_uow:
                 # FIXME(salesagent-9f2): package creation should use repository methods
-                from src.core.database.repositories.media_buy import MediaBuyRepository
-
                 assert pkg_uow.session is not None
                 session = pkg_uow.session
                 for pkg_obj in pending_packages:
@@ -3653,8 +3650,6 @@ async def _create_media_buy_impl(
         if req.packages or (response.packages and len(response.packages) > 0):
             with MediaBuyUoW(tenant["tenant_id"]) as auto_pkg_uow:
                 # FIXME(salesagent-9f2): package creation should use repository methods
-                from src.core.database.repositories.media_buy import MediaBuyRepository
-
                 assert auto_pkg_uow.session is not None
                 session = auto_pkg_uow.session
                 # Persist the adapter-reported packages (they carry the

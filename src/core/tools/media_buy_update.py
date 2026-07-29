@@ -487,11 +487,16 @@ def _update_media_buy_impl(
             # one raise site, so legacy buys never get a spurious not-found.
             # (Ungraded: no storyboard covers pre-dual-write data.)
             if req.packages:
-                for pkg_update in req.packages:
-                    if pkg_update.package_id:
-                        uow.media_buys.package_exists_or_raise(
-                            media_buy_id_to_use, pkg_update.package_id, context=req.context
-                        )
+                # Resolve the buy's raw_request package set ONCE in the bulk
+                # guard rather than re-loading it per package via the singular
+                # check (each miss re-fetches the whole buy). Order-preserving,
+                # so the first missing package still raises PACKAGE_NOT_FOUND.
+                # See MediaBuyRepository.packages_exist_or_raise.
+                uow.media_buys.packages_exist_or_raise(
+                    media_buy_id_to_use,
+                    [pkg_update.package_id for pkg_update in req.packages if pkg_update.package_id],
+                    context=req.context,
+                )
 
             # Extract testing context early (needed for dry_run check)
             testing_ctx = identity.testing_context if identity.testing_context else AdCPTestContext()

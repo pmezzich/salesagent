@@ -214,14 +214,30 @@ class MediaBuyRepository:
             )
         ).first()
 
-    def _find_raw_package(self, media_buy_id: str, package_id: str) -> dict[str, Any] | None:
-        """Find a package dict in ``MediaBuy.raw_request`` (read-only)."""
+    def _raw_packages_by_id(self, media_buy_id: str) -> dict[str, dict[str, Any]]:
+        """Map ``package_id -> raw_request package dict`` for a buy, in ONE load.
+
+        Resolves ``MediaBuy.raw_request["packages"]`` with a single ``get_by_id``.
+        ``_find_raw_package`` (and thus ``get_package_config`` /
+        ``materialize_package``) and the bulk ``packages_exist_or_raise`` guard
+        all read through here, so a guard checking k packages is one buy load
+        plus O(1) membership per package rather than k full-buy reloads. First
+        occurrence wins on a duplicate ``package_id``, matching the prior
+        first-match lookup.
+        """
         media_buy = self.get_by_id(media_buy_id)
         raw_packages = (media_buy.raw_request or {}).get("packages") if media_buy is not None else None
+        result: dict[str, dict[str, Any]] = {}
         for raw_pkg in raw_packages or []:
-            if isinstance(raw_pkg, dict) and raw_pkg.get("package_id") == package_id:
-                return raw_pkg
-        return None
+            if isinstance(raw_pkg, dict):
+                pid = raw_pkg.get("package_id")
+                if pid is not None:
+                    result.setdefault(pid, raw_pkg)
+        return result
+
+    def _find_raw_package(self, media_buy_id: str, package_id: str) -> dict[str, Any] | None:
+        """Find a package dict in ``MediaBuy.raw_request`` (read-only)."""
+        return self._raw_packages_by_id(media_buy_id).get(package_id)
 
     def get_package_config(self, media_buy_id: str, package_id: str) -> dict[str, Any] | None:
         """Read a package's config without requiring a canonical row.
@@ -250,6 +266,31 @@ class MediaBuyRepository:
         if self._find_raw_package(media_buy_id, package_id) is not None:
             return
         self._raise_package_not_found(media_buy_id, package_id, context)
+
+    def packages_exist_or_raise(
+        self, media_buy_id: str, package_ids: list[str], *, context: ContextObject | dict[str, Any] | None = None
+    ) -> None:
+        """Bulk existence guard for many packages under one buy, in one raw load.
+
+        The pre-dry_run guard checks every referenced package. Looping the
+        singular ``package_exists_or_raise`` would re-load the owning
+        ``MediaBuy`` once per package (each ``_find_raw_package`` →
+        ``get_by_id``); here the ``raw_request`` map is resolved ONCE and each
+        package is an O(1) membership test on top of its indexed
+        ``media_packages`` lookup. Read-only (never materializes), order-
+        preserving (raises on the first missing package), and shares the single
+        ``_raise_package_not_found`` site — so raw_request-only packages on
+        legacy buys are tolerated identically to the singular guard.
+        """
+        if not package_ids:
+            return
+        raw_packages = self._raw_packages_by_id(media_buy_id)
+        for package_id in package_ids:
+            if self.get_package(media_buy_id, package_id) is not None:
+                continue
+            if package_id in raw_packages:
+                continue
+            self._raise_package_not_found(media_buy_id, package_id, context)
 
     def materialize_package(self, media_buy_id: str, package_id: str) -> MediaPackage | None:
         """Get the package row, materializing it from raw_request if absent.

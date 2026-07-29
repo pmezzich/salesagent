@@ -949,18 +949,16 @@ _STORYBOARD_CORRELATION_ID = "corr-uc003-invalid-transitions"
 def given_fabricated_media_buy_id(ctx: dict) -> None:
     """Point the update at a media_buy_id absent from the seller catalog.
 
-    Verifies absence in the DB so the step's claim holds even if a factory
-    ever starts seeding similarly named buys.
+    Delegates the absence guarantee to the canonical, tenant-scoped
+    ``given_no_media_buy_by_id`` (:120) — which deletes any stray row within
+    the tenant — instead of re-inlining a non-scoped, assert-only check that
+    has already drifted from it. Mirrors how the package sibling
+    ``given_unrelated_package_reference`` delegates to
+    ``given_package_not_in_media_buy``.
     """
-    from sqlalchemy import select
-
-    from src.core.database.models import MediaBuy
-
     kwargs = _ensure_update_defaults(ctx)
     fabricated = "mb_fabricated_unknown"
-    with db_session(ctx) as session:
-        db_mb = session.scalars(select(MediaBuy).filter_by(media_buy_id=fabricated)).first()
-        assert db_mb is None, f"Media buy '{fabricated}' unexpectedly exists — fabricated ID must be absent"
+    given_no_media_buy_by_id(ctx, fabricated)
     kwargs["media_buy_id"] = fabricated
 
 

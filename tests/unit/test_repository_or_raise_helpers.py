@@ -8,7 +8,7 @@ that the helper returns the entity when present and raises the correct typed
 """
 
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -115,6 +115,45 @@ class TestMediaBuyOrRaise:
             repo.package_exists_or_raise("mb-1", "pkg-missing", context={"context_id": "ctx-3"})
         assert exc.value.error_code == "PACKAGE_NOT_FOUND"
         assert exc.value.context == {"context_id": "ctx-3"}
+
+    def test_packages_exist_or_raise_loads_buy_once_for_k_packages(self):
+        """The bulk guard resolves ``raw_request`` ONCE for k packages — the
+        per-package MediaBuy refetch it exists to eliminate. With the canonical
+        row lookups stubbed to miss, the only session query left is the single
+        buy load in ``_raw_packages_by_id``; a per-package refetch would make
+        it k."""
+        media_buy = MagicMock()
+        media_buy.raw_request = {"packages": [{"package_id": "pkg-a"}, {"package_id": "pkg-b"}]}
+        session = MagicMock()
+        session.scalars.return_value.first.return_value = media_buy
+        repo = MediaBuyRepository(session, "tenant-1")
+        with patch.object(repo, "get_package", return_value=None):
+            repo.packages_exist_or_raise("mb-1", ["pkg-a", "pkg-b"])  # no raise: both raw_request-only
+        assert session.scalars.return_value.first.call_count == 1
+
+    def test_packages_exist_or_raise_raises_on_missing_without_writing(self):
+        """A package present in neither store raises PACKAGE_NOT_FOUND with the
+        context echoed; the read-only bulk guard never materializes a row."""
+        media_buy = MagicMock()
+        media_buy.raw_request = {"packages": [{"package_id": "pkg-a"}]}
+        session = MagicMock()
+        session.scalars.return_value.first.return_value = media_buy
+        repo = MediaBuyRepository(session, "tenant-1")
+        with patch.object(repo, "get_package", return_value=None):
+            with pytest.raises(AdCPPackageNotFoundError) as exc:
+                repo.packages_exist_or_raise("mb-1", ["pkg-a", "pkg-missing"], context={"context_id": "ctx-11"})
+        assert exc.value.error_code == "PACKAGE_NOT_FOUND"
+        assert "pkg-missing" in str(exc.value)
+        assert exc.value.context == {"context_id": "ctx-11"}
+        session.add.assert_not_called()
+        session.flush.assert_not_called()
+
+    def test_packages_exist_or_raise_empty_is_a_noop(self):
+        """No package_ids → no buy load and no raise."""
+        session = MagicMock()
+        repo = MediaBuyRepository(session, "tenant-1")
+        repo.packages_exist_or_raise("mb-1", [])
+        session.scalars.assert_not_called()
 
     def test_get_package_config_reads_raw_request_without_writing(self):
         raw_pkg = {"package_id": "pkg-raw-only", "product_id": "prod-7"}
