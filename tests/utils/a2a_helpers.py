@@ -134,6 +134,9 @@ def make_a2a_identity(sample_tenant: dict, sample_principal: dict) -> ResolvedId
     copy. The ~17 builds in ``test_a2a_error_responses.py`` are the same 5-arg
     shape and are the follow-up migration onto this helper.
     """
+    # Function-local (unlike the module-top imports above) on purpose: tests/utils is a
+    # leaf, and ``tests.harness`` eagerly loads the full env hierarchy (with production
+    # ``_impl`` code), so pay that import cost only when this helper is actually called.
     from tests.harness import make_identity
 
     return make_identity(

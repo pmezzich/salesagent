@@ -10,9 +10,10 @@ import logging
 
 import pytest
 from a2a.server.routes.common import ServerCallContext
-from a2a.types import SendMessageRequest, Task
+from a2a.types import SendMessageRequest, Task, TaskState
 
-from tests.utils.a2a_helpers import create_a2a_message_with_skill
+from tests.helpers import assert_envelope_shape
+from tests.utils.a2a_helpers import create_a2a_message_with_skill, extract_data_from_artifact
 
 pytestmark = [pytest.mark.integration, pytest.mark.requires_db]
 
@@ -103,10 +104,7 @@ async def test_get_products_neither_brief_nor_brand_rejected(seamed_a2a_handler,
     the artifact DataPart — AdCP-domain errors are async-task failures, not
     JSON-RPC transport errors.
     """
-    from a2a.types import TaskState
-
     from src.core.config_loader import set_current_tenant
-    from tests.utils.a2a_helpers import extract_data_from_artifact
 
     set_current_tenant(sample_tenant)
 
@@ -125,6 +123,4 @@ async def test_get_products_neither_brief_nor_brand_rejected(seamed_a2a_handler,
     assert result.artifacts, "Failed task must carry an envelope artifact"
     envelope = extract_data_from_artifact(result.artifacts[0])
     # Two-layer envelope: adcp_error mirror + errors[] payload
-    from tests.helpers import assert_envelope_shape
-
     assert_envelope_shape(envelope, "VALIDATION_ERROR", recovery="correctable")
