@@ -422,9 +422,13 @@ class TestA2ADispatcherFailedSkillResult:
         assert env["adcp_error"]["code"] == "SERVICE_UNAVAILABLE"
         assert env["errors"][0]["code"] == "SERVICE_UNAVAILABLE"
         # The raw RuntimeError text must NOT reach the buyer (#1587): the wire
-        # carries the generic wire-standard message, never str(exc).
+        # carries the generic wire-standard message, never str(exc). Leak-freeness
+        # of the untyped path is pinned once, against the shared token set, in
+        # test_exception_normalization.py::test_untyped_exception_message_is_generic_not_raw
+        # (injects RAW_EXCEPTION_LEAK_SENTINEL, routes through assert_no_raw_exception_leak).
+        # Re-asserting ``"unexpected boom" not in ...`` here would be tautological after
+        # the == equality against a fixed generic constant that cannot contain it.
         assert env["errors"][0]["message"] == GENERIC_INTERNAL_ERROR_MESSAGE
-        assert "unexpected boom" not in env["errors"][0]["message"]
 
     def test_exception_with_empty_message_uses_generic_wire_message(self):
         """An untyped exception with no string content still yields a non-empty wire

@@ -163,8 +163,10 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
 
     Use this helper at every non-skill ``InternalError(...)`` raise site that
     is NOT a deliberate protocol-level convention (see push-notif handlers
-    below). The canonical prefix is ``"{operation} failed: {exc}"`` so
-    storyboard runners can parse the failure uniformly.
+    below). The canonical message is the prefix ``"{operation} failed: "``
+    followed by ``normalize_to_adcp_error(exc).message`` — the sanitized wire
+    message, never the raw ``exc`` — so storyboard runners can parse the
+    failure uniformly without the raw exception reaching the JSON-RPC wire.
 
     The four ``on_*_task_push_notification_config`` JSON-RPC protocol methods use
     this helper too — they have no async Task to carry a DataPart, so the two-layer

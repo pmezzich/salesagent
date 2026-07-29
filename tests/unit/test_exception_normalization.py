@@ -120,7 +120,7 @@ def test_normalize_is_a_pure_mapping_and_does_not_log(caplog):
     """
     import logging
 
-    leaky = RuntimeError("SELECT token FROM secret_table -- /var/secrets/db.key")
+    leaky = RuntimeError(RAW_EXCEPTION_LEAK_SENTINEL)
 
     with caplog.at_level(logging.DEBUG, logger="src.core.exceptions"):
         normalize_to_adcp_error(leaky)
