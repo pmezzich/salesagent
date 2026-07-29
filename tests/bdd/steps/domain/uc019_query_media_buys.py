@@ -24,8 +24,6 @@ from tests.factories import (
 )
 
 if TYPE_CHECKING:
-    from jsonschema.exceptions import ValidationError
-
     from src.core.schemas._base import GetMediaBuysMediaBuy
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2542,43 +2540,32 @@ _POST_CREATE_EXPECTED_STATUS = "pending_creatives"
 # Any OTHER discarded top-level key is a wire regression, not framing.
 _KNOWN_ENVELOPE_KEYS = frozenset({"message", "success", "status", "task_id", "context_id"})
 
-# The bundled schema (adcp==6.6.0, _schemas/3.1/bundled/media-buy/...) ships AdCP
-# 3.1 and marks two GetMediaBuys media-buy item fields required that the repo's
-# pinned GetMediaBuysMediaBuy model (a later revision, src/core/schemas/_base.py)
-# does not carry. Tolerate exactly those missing-required errors when validating
-# the wire against the authoritative artifact; every other violation is a real
-# regression. Mirrors the _KNOWN_ENVELOPE_KEYS allowlist above: name the known
+# ``confirmed_at`` and ``revision`` are marked REQUIRED on the get-media-buys
+# media-buy item by the pinned AdCP schema — get-media-buys-response.json @ 3.1.1,
+# and verified still required in 3.1.2 / 3.1.5 / 3.1.8; no later revision drops
+# them. The repo's hand-maintained GetMediaBuysMediaBuy (src/core/schemas/_base.py)
+# omits both, so production's get_media_buys wire is NON-CONFORMANT to the pin.
+# This is a known PRODUCTION gap (the real fix is to add + populate both fields on
+# the model — a separate production boundary, out of scope for this test-wiring
+# PR), NOT schema "version drift". Until the model is fixed, tolerate exactly those
+# two missing-required violations so the schema-valid step still grades every OTHER
+# field faithfully. Mirrors the _KNOWN_ENVELOPE_KEYS allowlist above: name the real
 # gap explicitly so the guard stays honest.
-_SCHEMA_DRIFT_REQUIRED = frozenset({"confirmed_at", "revision"})
+_UNMODELED_REQUIRED = frozenset({"confirmed_at", "revision"})
 
 
 def _load_get_media_buys_response_schema() -> dict:
     """Load the authoritative bundled AdCP get-media-buys-response JSON Schema.
 
-    adcp==6.6.0 ships it at ``_schemas/3.1/media-buy/get-media-buys-response.json``;
-    the ``bundled`` sibling inlines every ``$ref`` into ``$defs`` so jsonschema
-    validates the document standalone (no resolver/registry needed). Loaded via
-    ``importlib.resources`` so it resolves against the installed wheel regardless
-    of the working directory.
+    adcp==6.6.0 ships it at ``_schemas/3.1/bundled/media-buy/get-media-buys-response.json``;
+    the ``bundled`` variant inlines every ``$ref`` into ``$defs`` so jsonschema
+    validates the document standalone (no resolver/registry needed). Located via the
+    shared ``load_installed_adcp_schema`` helper so the installed-wheel path is
+    derived in one place (tests/helpers/installed_adcp_schema.py).
     """
-    import json
-    from importlib.resources import files
+    from tests.helpers.installed_adcp_schema import load_installed_adcp_schema
 
-    resource = files("adcp") / "_schemas" / "3.1" / "bundled" / "media-buy" / "get-media-buys-response.json"
-    return json.loads(resource.read_text(encoding="utf-8"))
-
-
-def _missing_required_prop(error: ValidationError) -> str | None:
-    """Return the single property named by a jsonschema ``required`` error.
-
-    jsonschema emits one error per missing required property with the stable
-    message ``"'<prop>' is a required property"`` — parse the property back out so
-    the caller can decide whether it is a tolerated version-drift field.
-    """
-    import re
-
-    match = re.match(r"^'(?P<prop>[^']+)' is a required property$", error.message)
-    return match.group("prop") if match else None
+    return load_installed_adcp_schema("3.1", "bundled", "media-buy", "get-media-buys-response.json")
 
 
 @given("the buyer captured a media_buy_id from a successful create_media_buy response")
@@ -2675,11 +2662,12 @@ def then_response_schema_valid_get_media_buys(ctx: dict) -> None:
     ``$defs``) — plus a top-level shape guard below.
 
     Two item-level ``required`` fields (``confirmed_at``/``revision``) are a known
-    version gap — the bundled schema is AdCP 3.1, while the pinned
-    ``GetMediaBuysMediaBuy`` (src/core/schemas/_base.py) targets a later revision
-    that does not carry them — so those specific missing-required errors are
-    tolerated (``_SCHEMA_DRIFT_REQUIRED``); every OTHER violation on a media buy (a
-    retyped id, a dropped item-level status, a malformed package) fails loud.
+    PRODUCTION gap, not version drift: the pinned schema marks them required, but
+    production's ``GetMediaBuysMediaBuy`` (src/core/schemas/_base.py) omits them, so
+    the wire cannot carry them. They are dropped from the item's ``required`` list
+    before validating (``_UNMODELED_REQUIRED``) so their absence is tolerated while
+    every OTHER violation on a media buy (a retyped id, a dropped item-level status,
+    a malformed package) still fails loud.
     """
     from jsonschema.validators import Draft7Validator
 
@@ -2705,17 +2693,16 @@ def then_response_schema_valid_get_media_buys(ctx: dict) -> None:
 
     # Grade each media buy against the authoritative item schema (declared draft-07,
     # matching the repo's other schema validators; $defs carried so internal $refs
-    # resolve). Surface every violation EXCEPT the two known version-drift
-    # missing-required fields.
+    # resolve). Express the known-missing-required tolerance against the SCHEMA —
+    # drop the two unmodeled fields from the item's ``required`` list — rather than
+    # pattern-matching jsonschema's error message (presentation, not contract): a
+    # message reword would silently stop matching and flip every transport red.
+    # Every other required field, and all non-required constraints, still grade.
     schema = _load_get_media_buys_response_schema()
     item_schema = {**schema["properties"]["media_buys"]["items"], "$defs": schema.get("$defs", {})}
+    item_schema["required"] = [name for name in item_schema.get("required", []) if name not in _UNMODELED_REQUIRED]
     validator = Draft7Validator(item_schema)
-    violations = [
-        (idx, err)
-        for idx, media_buy in enumerate(media_buys)
-        for err in validator.iter_errors(media_buy)
-        if not (err.validator == "required" and _missing_required_prop(err) in _SCHEMA_DRIFT_REQUIRED)
-    ]
+    violations = [(idx, err) for idx, media_buy in enumerate(media_buys) for err in validator.iter_errors(media_buy)]
     assert not violations, "get-media-buys-response.json schema violations on the wire:\n" + "\n".join(
         f"  media_buys[{idx}] at /{'/'.join(str(p) for p in err.absolute_path)}: {err.message}"
         for idx, err in violations
