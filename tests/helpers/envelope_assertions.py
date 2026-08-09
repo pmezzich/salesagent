@@ -25,7 +25,7 @@ def assert_no_raw_validation_leak(message: str) -> None:
     assert "errors.pydantic.dev" not in message, f"Pydantic documentation URL leaked into message: {message!r}"
 
 
-def assert_no_tenant_disclosure(target: Any, tenant_id: str) -> None:
+def assert_no_tenant_disclosure(target: dict[str, Any] | BaseException, tenant_id: str) -> None:
     """Assert an auth rejection discloses *tenant_id* nowhere the buyer can see it.
 
     The tenant is resolved from request headers BEFORE the token is validated, so
@@ -39,6 +39,9 @@ def assert_no_tenant_disclosure(target: Any, tenant_id: str) -> None:
     Args:
         target: What the buyer receives. Accepts:
             - a two-layer envelope ``dict`` (the wire body);
+            - an exception already carrying a built envelope (``AdCPToolError``
+              exposes it as ``.envelope``) — read directly, the same resolution
+              the sibling ``assert_envelope_shape`` performs;
             - an ``AdCPError`` exception, whose two-layer envelope is built here
               so the message AND every envelope field are graded;
             - any other ``Exception`` (e.g. a raw fastmcp ``ToolError`` from an
@@ -53,9 +56,18 @@ def assert_no_tenant_disclosure(target: Any, tenant_id: str) -> None:
     """
     import json
 
+    envelope: Any
     if isinstance(target, BaseException):
-        rendered = str(target)
-        if hasattr(target, "wire_error_code"):
+        if hasattr(target, "envelope"):
+            # Probe ``.envelope`` BEFORE ``wire_error_code``, exactly as the sibling
+            # ``assert_envelope_shape`` resolves its target: an ``AdCPToolError``
+            # already carries the built two-layer envelope, so reading it here is
+            # what keeps two co-located helpers with the same job from grading one
+            # exception two different ways. Falling through instead would stringify
+            # it into a single ``errors[0].message`` blob, and a leak would report
+            # that coarse path rather than the field it actually sits in.
+            envelope = target.envelope
+        elif hasattr(target, "wire_error_code"):
             from src.core.exceptions import build_two_layer_error_envelope
 
             envelope = build_two_layer_error_envelope(target)
@@ -65,10 +77,17 @@ def assert_no_tenant_disclosure(target: Any, tenant_id: str) -> None:
             # that would wrap it, so the message is the only buyer-facing surface.
             # Grade the message alone; the MCP no-disclosure scenario documents this
             # as the weaker, message-only half of the same contract.
-            envelope = {"errors": [{"message": rendered}]}
+            envelope = {"errors": [{"message": str(target)}]}
     else:
-        envelope = target.envelope if hasattr(target, "envelope") else target
-        assert isinstance(envelope, dict), f"envelope target must resolve to dict, got {type(envelope).__name__}"
+        envelope = target
+
+    assert isinstance(envelope, dict), f"envelope target must resolve to dict, got {type(envelope).__name__}"
+
+    # An exception renders its own buyer-facing message (MCP surfaces ``str(exc)``
+    # verbatim); an envelope dict carries it at ``errors[0].message``.
+    if isinstance(target, BaseException):
+        rendered = str(target)
+    else:
         rendered = str((envelope.get("errors") or [{}])[0].get("message", ""))
 
     assert tenant_id not in rendered, f"auth error message disclosed the tenant id {tenant_id!r}: {rendered!r}"

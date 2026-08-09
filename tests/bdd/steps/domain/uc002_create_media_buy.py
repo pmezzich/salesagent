@@ -21,6 +21,7 @@ from pytest_bdd import given, parsers, then, when
 from tests.bdd.steps._harness_db import db_session as _db_session
 from tests.bdd.steps._outcome_helpers import _get_response_field
 from tests.factories.account import AccountFactory, AgentAccountAccessFactory
+from tests.harness._base import InvalidAuthHint
 
 # ═══════════════════════════════════════════════════════════════════════
 # GIVEN steps — request setup and account state
@@ -829,7 +830,8 @@ def _dispatch_full_create(ctx: dict) -> None:
     # the identity's token as real headers anyway.
     extra: dict = {}
     if ctx.get("invalid_auth_token"):
-        extra["_invalid_auth"] = {"token": ctx["invalid_auth_token"], "tenant": ctx["undisclosed_tenant_id"]}
+        hint: InvalidAuthHint = {"token": ctx["invalid_auth_token"], "tenant": ctx["undisclosed_tenant_id"]}
+        extra["_invalid_auth"] = hint
 
     # No-auth scenarios (#1417) stash an unauthenticated identity so the
     # transport-boundary account-resolution guard is exercised on the wire.

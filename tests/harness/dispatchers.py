@@ -21,6 +21,7 @@ import copy
 import json
 from typing import TYPE_CHECKING, Any
 
+from tests.harness._base import InvalidAuthHint, _invalid_auth_headers
 from tests.harness.transport import Transport, TransportResult
 
 if TYPE_CHECKING:
@@ -282,7 +283,7 @@ class RestE2EDispatcher:
         # UUID as ``x-adcp-tenant`` makes ``resolve_identity``'s direct-tenant-id
         # fallback detect it, so the leg reaches the raise with the real id and
         # reddens on a revert.
-        invalid_auth = kwargs.pop("_invalid_auth", None)
+        invalid_auth: InvalidAuthHint | None = kwargs.pop("_invalid_auth", None)
         base_url = env.e2e_config.base_url
 
         # identity=None means "send without auth headers" (no-auth test) — let the
@@ -291,8 +292,7 @@ class RestE2EDispatcher:
         # so the server rejects gracefully instead of httpx raising on a None header.
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if invalid_auth is not None:
-            headers["x-adcp-auth"] = invalid_auth["token"]
-            headers["x-adcp-tenant"] = invalid_auth["tenant"]
+            headers.update(_invalid_auth_headers(invalid_auth))
         elif identity is not None:
             if identity.auth_token is not None:
                 headers["x-adcp-auth"] = identity.auth_token
