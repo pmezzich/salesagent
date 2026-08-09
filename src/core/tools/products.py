@@ -785,6 +785,11 @@ async def get_products(
     ] = None,
     brief: Annotated[str, Field(description="Natural language description of campaign goals and requirements")] = "",
     filters: ProductFilters | None = None,
+    # Keyword-only from here on. buying_mode was inserted between property_list and
+    # context, so without this marker a positional caller of context would silently bind
+    # its value into a spec enum field. FastMCP builds the tool schema from the
+    # annotations, so the advertised parameters are unchanged.
+    *,
     property_list: PropertyListReference | None = None,
     # buying_mode is the sole entry in the required array of get-products-request at the
     # pinned spec (3.1.1), so a spec-valid client always sends it. It must be DECLARED on
@@ -792,7 +797,7 @@ async def get_products(
     # buying_mode 400s (VALIDATION_ERROR, "Unexpected keyword argument") in dev/CI — the same
     # required field REST had to declare. Typed to adcp.BuyingMode — the StrEnum of
     # ["brief","wholesale","refine"] the SDK generates from get-products-request.json@3.1.1 —
-    # the single source shared with the REST GetProductsBody field (src/routes/api_v1.py:90)
+    # the single source shared with the REST GetProductsBody.buying_mode field (src/routes/api_v1.py)
     # so the two boundaries and the SDK can't drift; the boundary rejects a non-spec value
     # instead of accepting it. Accept-and-ignore: declared so a conformant client isn't
     # rejected, but not forwarded to _impl — no transport acts on the value yet. Wiring it

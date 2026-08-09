@@ -4,8 +4,11 @@ Validates the first REST transport for get_products:
 - Endpoint exists and returns 200
 - Response has 'products' field
 - Auth-optional (discovery skill)
-- Version compat applied when adcp_version < 3.0
+- The body declares, and the route forwards, every field the request object carries
 - Error responses use AdCPError format
+
+MCP-side schema grading for get_products lives in tests/unit/test_mcp_tool_schemas.py,
+not here.
 
 beads: salesagent-b61l.13
 """
@@ -14,15 +17,11 @@ from unittest.mock import patch
 
 import pytest
 from adcp import BuyingMode
-from fastmcp.tools.tool import Tool
 from starlette.testclient import TestClient
 
 from src.app import app
 from src.core.resolved_identity import ResolvedIdentity
 from src.core.schemas import GetProductsResponse
-from src.core.tools.products import get_products
-from src.routes.api_v1 import GetProductsBody
-from tests.harness.product import _BODY_FIELDS
 from tests.helpers import assert_envelope_shape
 
 _MOCK_IDENTITY = ResolvedIdentity(
@@ -64,29 +63,38 @@ class TestRESTProductsEndpoint:
     @pytest.mark.parametrize(
         "body",
         [
-            pytest.param({"brief": "video ads"}, id="brief-only"),
-            pytest.param({"brief": "video ads", "buying_mode": "brief"}, id="with-buying-mode"),
+            pytest.param({"brief": "video ads"}, id="no-buying-mode-current-leniency"),
+            *(
+                pytest.param({"brief": "video ads", "buying_mode": mode.value}, id=f"with-{mode.value}")
+                for mode in BuyingMode
+            ),
         ],
     )
     @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
     def test_endpoint_accepts_spec_valid_body(self, mock_resolve, stub_impl, body):
-        """A spec-valid body — with or without buying_mode — is accepted at 200.
+        """Every adcp.BuyingMode member is accepted at 200, and none of them reaches the request.
 
-        buying_mode is the sole entry in the required array of get-products-request
-        at the pinned spec (3.1.1), so a spec-valid client always sends it. Under the
-        dev/CI extra="forbid" policy an undeclared field is rejected, so REST has to
-        declare it.
+        The rows are generated from ``adcp.BuyingMode`` rather than hand-listed, so this
+        is the non-vacuity oracle for the REST field being typed to the SDK enum: retype
+        GetProductsBody.buying_mode to a narrower hand-written Literal and the dropped
+        member's row reddens with HTTP 400. Under the dev/CI extra="forbid" policy an
+        undeclared field is rejected outright, which is why REST has to declare it at all.
 
-        Not framed as MCP/A2A parity: MCP rejects buying_mode in dev/CI
-        (VALIDATION_ERROR, "Unexpected keyword argument") because its tool schema is
-        additionalProperties: false without it, and A2A's acceptance is meaningless
-        since it accepts any unknown field.
+        ``no-buying-mode-current-leniency`` is a characterization row, not a conformance
+        one: get-products-request.json@3.1.1 lists buying_mode in its ``required`` array,
+        so an omitting client is spec-invalid. This route accepts it anyway; the row pins
+        that leniency as today's behaviour, with enforcement deferred to #1730.
 
-        Deletion oracle: drop ``buying_mode`` from GetProductsBody and the
-        ``with-buying-mode`` row reddens with HTTP 400 (INVALID_REQUEST,
-        recovery=correctable) — not the 422 an earlier version of this docstring
-        claimed. FastAPI's default 422 is replaced by the RequestValidationError
-        handler in src/app.py, which maps INVALID_REQUEST to 400.
+        The ``req.buying_mode is None`` assertion pins accept-and-ignore as a tested
+        decision rather than an unobserved side effect — the route declares the field so a
+        conformant client is not rejected, but no transport acts on the value yet. It
+        reddens the day buying_mode is threaded, forcing a deliberate update.
+
+        Deletion oracle: drop ``buying_mode`` from GetProductsBody and every
+        ``with-*`` row reddens with HTTP 400 (INVALID_REQUEST, recovery=correctable) —
+        not the 422 an earlier version of this docstring claimed. FastAPI's default 422 is
+        replaced by the RequestValidationError handler in src/app.py, which maps
+        INVALID_REQUEST to 400.
         """
         response = client.post(
             "/api/v1/products",
@@ -96,6 +104,46 @@ class TestRESTProductsEndpoint:
         assert response.status_code == 200, (
             f"spec-valid body should be accepted, got {response.status_code}: {response.text}"
         )
+        assert stub_impl.await_count == 1, "an accepted body must reach _get_products_impl"
+        req = stub_impl.await_args.args[0]
+        assert req.buying_mode is None, (
+            f"buying_mode is accept-and-ignore today — the route must not thread it into "
+            f"GetProductsRequest, got {req.buying_mode!r}. Wiring it (#1730) has to update "
+            f"this assertion deliberately."
+        )
+
+    @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
+    def test_route_forwards_property_list_and_context(self, mock_resolve, stub_impl):
+        """property_list and context reach GetProductsRequest, as they do on MCP and A2A.
+
+        property_list is not decorative: ``_get_products_impl`` resolves it and filters the
+        returned set through ``filter_products_by_property_list``. While GetProductsBody
+        omitted the field, FastAPI dropped it before the route ran, so a REST buyer that
+        sent property_list received an UNFILTERED catalog at HTTP 200 — a wrong answer with
+        no error — while the MCP tool and the A2A skill handler both forwarded it.
+
+        Deletion oracle: remove either field from GetProductsBody, or stop passing it into
+        create_get_products_request, and this reddens. The declaration half is additionally
+        pinned by test_architecture_rest_body_completeness.py, which now pairs
+        GetProductsBody with get_products_raw.
+        """
+        response = client.post(
+            "/api/v1/products",
+            json={
+                "brief": "video ads",
+                "property_list": {"agent_url": "https://props.example.com", "list_id": "list-1"},
+                "context": {"campaign_id": "camp-1"},
+            },
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert response.status_code == 200, f"expected 200, got {response.status_code}: {response.text}"
+
+        req = stub_impl.await_args.args[0]
+        assert req.property_list is not None, "REST dropped property_list; MCP and A2A forward it"
+        assert req.property_list.list_id == "list-1"
+        assert str(req.property_list.agent_url).rstrip("/") == "https://props.example.com"
+        assert req.context is not None, "REST dropped context; MCP and A2A forward it"
+        assert req.context.model_dump()["campaign_id"] == "camp-1"
 
     @pytest.mark.parametrize(
         "body",
@@ -138,6 +186,7 @@ class TestRESTProductsEndpoint:
 
         assert response.status_code == 400, f"expected 400, got {response.status_code}: {response.text}"
         assert_envelope_shape(response.json(), "INVALID_REQUEST", recovery="correctable")
+        stub_impl.assert_not_called()  # rejected at the boundary — the impl is never reached
 
     @patch("src.core.resolved_identity.resolve_identity", return_value=_MOCK_IDENTITY)
     def test_response_has_products_field(self, mock_resolve, stub_impl):
@@ -160,20 +209,6 @@ class TestRESTProductsEndpoint:
         # Should return 200, not 401 — discovery skill allows unauthenticated access
         assert response.status_code == 200, f"Discovery skill should work without auth, got {response.status_code}"
 
-    def test_body_fields_match_model(self):
-        """The harness REST body builder must list exactly GetProductsBody's fields.
-
-        tests/harness/product.py hand-lists GetProductsBody's fields in _BODY_FIELDS
-        to shape the REST POST body. This PR had to edit that tuple in lockstep with
-        adding buying_mode to the model; the next field added to the model would
-        otherwise be silently dropped from every REST harness call. Pin the two
-        together so drift fails here instead of shipping.
-        """
-        assert set(_BODY_FIELDS) == set(GetProductsBody.model_fields), (
-            "tests/harness/product.py _BODY_FIELDS drifted from GetProductsBody.model_fields; "
-            "update the tuple so REST harness calls forward every declared field"
-        )
-
     def test_endpoint_not_404(self):
         """POST /api/v1/products must exist (not 404)."""
         response = client.post(
@@ -181,58 +216,3 @@ class TestRESTProductsEndpoint:
             json={"brief": "test"},
         )
         assert response.status_code != 404, "REST endpoint /api/v1/products should exist"
-
-
-# ---------------------------------------------------------------------------
-# MCP transport: schema declaration
-# ---------------------------------------------------------------------------
-
-
-class TestMCPProductsSchemaDeclaration:
-    """The MCP get_products tool must declare buying_mode, grounded on adcp.BuyingMode.
-
-    buying_mode is the sole required entry of get-products-request@3.1.1, so a
-    spec-valid client sends it on every transport. FastMCP advertises
-    additionalProperties: false over the get_products params, so an *undeclared*
-    buying_mode 400s (VALIDATION_ERROR, "Unexpected keyword argument") in dev/CI —
-    the same rejection REST's extra="forbid" produces. This pins the MCP-side
-    declaration (src/core/tools/products.py:800) so that removing buying_mode from
-    the signature reddens here instead of silently shipping a tool that rejects the
-    required field.
-
-    It also pins the enum to adcp.BuyingMode: the REST GetProductsBody field
-    (src/routes/api_v1.py:90) and this MCP declaration share that one SDK enum rather
-    than two hand-transcribed Literals, so an adcp bump that adds a mode cannot leave
-    one boundary stale. The live 4-transport UC-001 acceptance that exercises the wire
-    is deferred to #1730; this unit test pins the declaration.
-    """
-
-    @staticmethod
-    def _buying_mode_enum(node: dict, root_schema: dict) -> set[str]:
-        """Resolve buying_mode's enum whether FastMCP inlines it or emits a $ref."""
-        defs = root_schema.get("$defs", {})
-        for branch in node.get("anyOf", [node]):
-            if "$ref" in branch:
-                branch = defs.get(branch["$ref"].split("/")[-1], {})
-            if "enum" in branch:
-                return set(branch["enum"])
-        return set()
-
-    def test_mcp_tool_declares_buying_mode_enum(self):
-        """MCP get_products declares buying_mode as the adcp.BuyingMode enum.
-
-        Deletion oracle: drop buying_mode from the get_products signature and the
-        presence assertion reddens; retype it to a hand-written Literal that drifts
-        from adcp.BuyingMode and the enum-equality assertion reddens.
-        """
-        schema = Tool.from_function(get_products).parameters
-        props = schema["properties"]
-
-        assert "buying_mode" in props, (
-            "MCP get_products must declare buying_mode; FastMCP's additionalProperties: false "
-            "otherwise 400s the sole required field of get-products-request@3.1.1"
-        )
-        assert self._buying_mode_enum(props["buying_mode"], schema) == {m.value for m in BuyingMode}, (
-            "MCP buying_mode enum drifted from adcp.BuyingMode; both REST and MCP must ground on "
-            "the SDK enum so an adcp bump updates them together"
-        )

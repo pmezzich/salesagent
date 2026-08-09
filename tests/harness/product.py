@@ -40,14 +40,17 @@ import asyncio
 from typing import Any
 
 from src.core.schemas import GetProductsResponse
+from src.routes.api_v1 import GetProductsBody
 from tests.harness._base import IntegrationEnv
 from tests.harness._mixins import ProductMixin
 
-# The field set of GetProductsBody (src/routes/api_v1.py), used to shape the REST
-# POST body. Hand-listed here (rather than derived) so this module keeps its
-# tests/harness -> src.routes non-dependency; the drift against the model is pinned
-# by test_body_fields_match_model in tests/unit/test_rest_api_products.py.
-_BODY_FIELDS = ("brief", "brand", "filters", "buying_mode", "adcp_version")
+# The field set of GetProductsBody, used to shape the REST POST body. Derived from
+# the model rather than hand-listed so a field added to GetProductsBody cannot be
+# silently dropped from every REST harness call. There is no tests/harness ->
+# src.routes layering barrier to preserve: IntegrationEnv's REST client already does
+# ``from src.app import app`` (tests/harness/_base.py), and src/app.py imports
+# src.routes.api_v1, so the module is loaded in-process before build_rest_body runs.
+_BODY_FIELDS = tuple(GetProductsBody.model_fields)
 
 
 class ProductEnv(ProductMixin, IntegrationEnv):
@@ -115,9 +118,8 @@ class ProductEnv(ProductMixin, IntegrationEnv):
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """Convert kwargs to GetProductsBody shape for REST POST.
 
-        Shapes the body from ``_BODY_FIELDS``, which is pinned to
-        ``GetProductsBody.model_fields`` by ``test_body_fields_match_model`` in
-        ``tests/unit/test_rest_api_products.py`` so the two cannot drift.
+        Shapes the body from ``_BODY_FIELDS``, which *is* ``GetProductsBody.model_fields``
+        — the two cannot drift by construction.
         """
         return {k: kwargs[k] for k in _BODY_FIELDS if k in kwargs and kwargs[k] is not None}
 
