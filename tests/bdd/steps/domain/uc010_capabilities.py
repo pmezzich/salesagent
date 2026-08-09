@@ -51,19 +51,34 @@ def _wire_pricing_models(ctx: dict) -> Any:
     return _wire_media_buy(ctx).get("supported_pricing_models")
 
 
-def _assert_wire_pricing_equals(ctx: dict, expected: set[str]) -> None:
-    """Assert the wire pricing-model array equals ``expected`` exactly, no dupes.
+def _wire_pricing_list(ctx: dict) -> list[Any]:
+    """Return the wire pricing-model value, asserting it is a JSON array first.
 
-    The kernel both grading Then steps share: the wire value is a JSON array, its
-    set equals the expected surface, and it carries no duplicate entries
-    (``supported_pricing_models`` is a set on the wire). Callers own their own
-    error/absence prechecks and compute their own expected surface, then delegate
-    the array-shape + equality + dedup checks here so the three cannot drift.
+    The array-shape guard sits BELOW the equality concern deliberately: every
+    grading Then step needs the shape checked, but they disagree about what to
+    do next (set equality against a pinned surface vs ``cpm`` membership). Owning
+    the ``isinstance`` check and its message here lets both share the guard
+    without forcing the membership oracle through an equality helper, so the
+    diagnostic for "the field is missing / arrived as a scalar" cannot drift
+    between call sites.
     """
     models = _wire_pricing_models(ctx)
     assert isinstance(models, list), (
         f"media_buy.supported_pricing_models should be an array on the wire, got {models!r}"
     )
+    return models
+
+
+def _assert_wire_pricing_equals(ctx: dict, expected: set[str]) -> None:
+    """Assert the wire pricing-model array equals ``expected`` exactly, no dupes.
+
+    The kernel the two set-equality Then steps share: the wire value's set equals
+    the expected surface and it carries no duplicate entries
+    (``supported_pricing_models`` is a set on the wire). Callers own their own
+    error/absence prechecks and compute their own expected surface; the array
+    shape is guaranteed upstream by ``_wire_pricing_list``.
+    """
+    models = _wire_pricing_list(ctx)
     assert set(models) == expected, (
         f"wire pricing models diverge from the expected surface: wire={sorted(models)!r}, expected={sorted(expected)!r}"
     )
@@ -146,10 +161,7 @@ def then_pricing_models_non_empty(ctx: dict) -> None:
 
     error = ctx.get("error")
     assert error is None, f"capabilities request failed: {error!r}"
-    models = _wire_pricing_models(ctx)
-    assert isinstance(models, list), (
-        f"media_buy.supported_pricing_models should be an array on the wire, got {models!r}"
-    )
+    models = _wire_pricing_list(ctx)
     # Element-level, not a count: every ad server sells CPM (the base adapter
     # default is literally {"cpm"}), so naming it is the concrete non-emptiness
     # oracle — a count check would pass on a list of the wrong thing.
