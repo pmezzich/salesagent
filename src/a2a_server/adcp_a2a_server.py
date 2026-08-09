@@ -164,9 +164,12 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
     Use this helper at every non-skill ``InternalError(...)`` raise site that
     is NOT a deliberate protocol-level convention (see push-notif handlers
     below). The canonical message is the prefix ``"{operation} failed: "``
-    followed by ``normalize_to_adcp_error(exc).message`` — the sanitized wire
-    message, never the raw ``exc`` — so storyboard runners can parse the
-    failure uniformly without the raw exception reaching the JSON-RPC wire.
+    followed by ``normalize_to_adcp_error(exc).message`` — for an untyped
+    exception the generic wire message, never the raw ``exc``; for a typed
+    ``AdCPError`` (including the ``ValueError``/``PermissionError`` mappings)
+    that error's own message, forwarded unchanged. So storyboard runners can
+    parse the failure uniformly, and the untyped-exception text this sink exists
+    to contain never reaches the JSON-RPC wire.
 
     The four ``on_*_task_push_notification_config`` JSON-RPC protocol methods use
     this helper too — they have no async Task to carry a DataPart, so the two-layer
@@ -184,9 +187,10 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
     # reachable without authentication (top-level ``on_message_send`` and the
     # four push-notification-config methods). ``normalize_to_adcp_error``
     # returns the wire-standard message for an untyped exception (raw detail is
-    # logged server-side) and a typed ``AdCPError``'s own curated message
-    # otherwise, so the parseable ``"{operation} failed: "`` prefix is kept
-    # without leaking.
+    # logged server-side) and the typed error's own message otherwise — a typed
+    # message is only as sanitized as its raise site, so what this helper closes
+    # is the untyped fallthrough, while keeping the parseable
+    # ``"{operation} failed: "`` prefix.
     adcp_error = normalize_to_adcp_error(exc)
     return InternalError(
         message=f"{operation} failed: {adcp_error.message}",

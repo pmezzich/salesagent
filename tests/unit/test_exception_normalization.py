@@ -13,6 +13,7 @@ from tests.helpers import (
     assert_no_raw_exception_leak,
     assert_no_raw_validation_leak,
 )
+from tests.helpers.envelope_assertions import _RAW_EXCEPTION_LEAK_TOKENS
 
 
 def test_pydantic_validation_error_normalization_is_structured_and_sanitized():
@@ -92,6 +93,25 @@ def test_untyped_exception_message_is_generic_not_raw():
     assert normalized.error_code == "INTERNAL_ERROR"
     assert normalized.message == GENERIC_INTERNAL_ERROR_MESSAGE
     assert_no_raw_exception_leak(normalized.message)
+
+
+@pytest.mark.parametrize("token", _RAW_EXCEPTION_LEAK_TOKENS)
+def test_each_raw_exception_leak_token_is_individually_enforced(token):
+    """Every entry in the oracle's token tuple actually fails the oracle.
+
+    ``assert_no_raw_exception_leak`` is the only mechanism grading sanitization at
+    the untyped sinks, and until now its own token tuple was pinned by nothing:
+    dropping an entry, or replacing the tuple with ``()``, left the whole suite
+    green while the helper quietly stopped checking. The import-time asserts
+    beside the constants cover the empty-tuple and absent-from-the-sentinel
+    mutations; this covers a token that is still listed but no longer enforced
+    (e.g. a loop that stops early or filters the tuple).
+    """
+    with pytest.raises(AssertionError):
+        assert_no_raw_exception_leak(f"boundary message: {token}")
+
+    # ...and the oracle is not simply raising on everything it is handed.
+    assert_no_raw_exception_leak(GENERIC_INTERNAL_ERROR_MESSAGE)
 
 
 def test_generic_internal_error_message_is_non_empty():

@@ -118,7 +118,7 @@ ERROR_CODE_MAPPING: dict[str, str] = {
 # justification for why it is internal.
 INTERNAL_CODES: frozenset[str] = frozenset(
     {
-        "INTERNAL_ERROR",  # Base-class default; never instantiated for wire
+        "INTERNAL_ERROR",  # AdCPError base default; untyped fallthrough raises it. wire → SERVICE_UNAVAILABLE
         "NOT_FOUND",  # Base-class for entity-specific NotFound subclasses
         "FORMAT_NOT_FOUND",  # AdCPFormatNotFoundError; wire → INVALID_REQUEST
         "TASK_NOT_FOUND",  # AdCPTaskNotFoundError; wire → INVALID_REQUEST
@@ -1101,10 +1101,20 @@ def normalize_to_adcp_error(exc: Exception) -> AdCPError:
         return AdCPValidationError(str(exc))
     if isinstance(exc, PermissionError):
         return AdCPAuthorizationError(str(exc))
-    # An untyped exception's str() can carry SQL fragments, table names, or
-    # filesystem paths (SQLAlchemy/OS errors). build_two_layer_error_envelope
-    # forwards the message verbatim to the wire envelope and the A2A failed-Task
-    # webhook body, so only a generic message may reach the buyer. The raw detail
+    # Scope: this sanitization covers the untyped fallthrough below and nothing
+    # above it. The earlier branches forward their own message by design — an
+    # already-typed AdCPError keeps whatever message its raiser chose, and
+    # ValueError/PermissionError map to AdCPValidationError/AdCPAuthorizationError
+    # with str(exc) intact, because a buyer-correctable error has to say what to
+    # correct. Those messages are therefore only as safe as their raise sites: a
+    # library-raised ValueError or an errno-bearing OSError reaches the buyer
+    # verbatim.
+    #
+    # The untyped fallthrough carries no such contract. Its str() can hold SQL
+    # fragments, table names, or filesystem paths (SQLAlchemy/OS errors), and
+    # build_two_layer_error_envelope forwards the message verbatim to the wire
+    # envelope and the A2A failed-Task webhook body — so this branch, and only
+    # this branch, substitutes the generic wire message. The raw detail
     # is captured server-side at the transport boundary — every boundary passes
     # the raw exception to record_boundary_error (MCP _handle_tool_exception; A2A
     # on_message_send, the skill loop, and the four push-config methods), which
