@@ -129,14 +129,31 @@ def make_a2a_identity(sample_tenant: dict, sample_principal: dict) -> ResolvedId
     call, so the A2A suite routes through the one identity home the harness exposes
     and keeps its ``-> ResolvedIdentity`` contract in a single place.
 
-    Shared because the A2A integration tests all need the identical
-    ``protocol="a2a"`` identity and were each carrying a byte-identical private
-    copy. The ~17 builds in ``test_a2a_error_responses.py`` are the same 5-arg
-    shape and are the follow-up migration onto this helper.
+    Shared because the A2A explicit-skill integration tests need the identical
+    ``protocol="a2a"`` identity: ``test_a2a_brand_manifest.py`` carried a private
+    copy of this exact call (deleted here), and ``test_a2a_error_responses.py``
+    inlines the same 5-kwarg shape 16 more times.
+
+    Scope of the follow-up migration — the unit is the whole seam block, not the
+    identity third alone. 14 of those 16 sites pair the identity build with the same
+    two seam assignments (``_get_auth_token`` / ``_resolve_a2a_identity`` stubbed on a
+    per-test fresh handler), which is exactly what ``seamed_a2a_handler``
+    (``tests/integration/conftest.py``) now folds into one fixture; the other 2 call
+    ``_handle_*_skill`` directly with no seams and take this helper on its own.
+    Blocking detail for whoever does it: that file seeds its own ``a2a_error_test``
+    tenant and depends on local ``test_tenant`` / ``test_principal`` fixtures, while
+    ``seamed_a2a_handler`` is bound to ``sample_tenant`` / ``sample_principal`` — one
+    of the two has to give before the seam block can be reused there.
+
+    Explicitly NOT a candidate: ``test_a2a_response_message_fields.py``'s 2 builds are
+    a different 4-kwarg shape (no ``auth_token``; one passes a ``LazyTenantContext``
+    rather than a tenant dict).
     """
-    # Function-local (unlike the module-top imports above) on purpose: tests/utils is a
-    # leaf, and ``tests.harness`` eagerly loads the full env hierarchy (with production
-    # ``_impl`` code), so pay that import cost only when this helper is actually called.
+    # Function-local (unlike the module-top imports above) on purpose: tests/utils is a leaf,
+    # and importing ``tests.harness`` eagerly loads the whole env hierarchy — its ``__init__``
+    # pulls ``product``/``delivery_poll``, which pull ``tests.harness._mixins``, which imports
+    # ``_get_products_impl`` and ``_get_media_buy_delivery_impl`` at module level. Pay that
+    # production-import cost only when this helper is actually called.
     from tests.harness import make_identity
 
     return make_identity(
