@@ -283,11 +283,11 @@ class TestSchemaInheritance:
             # buyer_package_ref (exclude=True, off the wire); the parent types it
             # Sequence[Package].
             ("UpdateMediaBuySuccess", "affected_packages"),
-            # Pattern #4 (mirrors ListAccountsResponse.accounts / ListCreativesResponse
-            # .creatives): local SyncResponseAccount adds action/status/errors/setup, and
-            # the field is redeclared required-with-no-default because pinned 3.1 types
-            # sync-accounts-response as oneOf(success requires `accounts` | error requires
-            # `errors`).
+            # Pattern #4 nested serialization: the field is retyped to a local element
+            # class, so it can never migrate to plain inheritance. See the
+            # SyncAccountsResponse.accounts field declaration in
+            # src/core/schemas/account.py for the full rationale. Kept as a pointer, not a
+            # restatement, so the argument lives in exactly one place.
             ("SyncAccountsResponse", "accounts"),
             # Pattern #4: local SyncCreativeResult adds assigned_to/assignment_errors/
             # changes/warnings; required-no-default per pinned 3.1 SyncCreativesSuccess.

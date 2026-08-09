@@ -59,7 +59,7 @@ from src.core.schemas import (
 from tests.factories.creative_asset import build_assets, image_spec, url_spec, video_spec
 
 
-def _assert_field_inherits_parent_annotation(local_cls, parent_cls, field_name):
+def _assert_field_inherits_parent_annotation(local_cls: type, parent_cls: type, field_name: str) -> None:
     """Assert a local schema field carries EXACTLY its adcp parent's annotation.
 
     Shared by the *_inherits_parent_typed_annotations tests: the adcp library
