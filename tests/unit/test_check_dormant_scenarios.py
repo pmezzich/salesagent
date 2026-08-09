@@ -143,8 +143,8 @@ class TestClassify:
             xt.step_definition_not_found('Step definition is not found: Given "something"'),
             xt.not_implemented("E2E_MCP dispatcher is not yet implemented"),
             xt.no_harness_wired("UC-026"),
-            f"UC-003 harness {xt.NOT_YET_WIRED} for non-extension scenarios",
-            f"UC-011 harness {xt.NOT_YET_WIRED} for markers: {{'billing'}}",
+            xt.not_yet_wired("UC-003", "for non-extension scenarios"),
+            xt.not_yet_wired("UC-011", "for markers: {'billing'}"),
         ],
         ids=["step-missing", "not-implemented", "no-harness", "uc003-unwired", "uc011-unwired"],
     )
@@ -639,3 +639,45 @@ class TestRunGuard:
         out = capsys.readouterr().out
         assert rc == 0
         assert "nothing to check" in out
+
+
+class TestMergeBaseGuard:
+    """A ``git merge-base`` that fails must bail loudly, never diff ``"..HEAD"``.
+
+    ``_git`` runs with ``check=False``, so on a shallow clone (or against an
+    unrelated ref) ``merge-base`` returns ""; the interpolated range collapses
+    to ``"..HEAD"``, which git resolves to HEAD..HEAD -- exit 0, empty diff. The
+    committed half of the change set silently vanishes and the checker prints
+    its all-clear on a branch that DID edit BDD files, the exact false green
+    this tool exists to kill.
+
+    Deletion oracle: drop the ``if not merge_base`` guard in ``changed_paths``
+    and both tests redden -- the "..HEAD" diff is issued and the bail message is
+    replaced by the "nothing to check" all-clear.
+    """
+
+    def test_bails_instead_of_diffing_head_against_head(self, monkeypatch, capsys):
+        calls: list[tuple[str, ...]] = []
+
+        def fake_git(*args: str) -> str:
+            calls.append(args)
+            # The base ref resolves (rev-parse) but shares no history with HEAD.
+            return "0123456789abcdef" if args[0] == "rev-parse" else ""
+
+        monkeypatch.setattr(cds, "_git", fake_git)
+        monkeypatch.setattr(sys, "argv", ["check_dormant_scenarios.py"])
+        rc = cds.main()
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "no merge-base with upstream/main" in out
+        assert "nothing to check" not in out, "a bail must not read as a checked all-clear"
+        assert not any("..HEAD" in arg for call in calls for arg in call), (
+            f"a diff range was issued with an empty merge-base: {calls}"
+        )
+
+    def test_changed_paths_signals_none_rather_than_an_empty_diff(self, monkeypatch):
+        """``[]`` is indistinguishable from "nothing changed" -- main's all-clear
+        branch -- so the no-merge-base case needs its own signal."""
+        monkeypatch.setattr(cds, "_git", lambda *args: "")
+        assert cds.changed_paths("upstream/main") is None

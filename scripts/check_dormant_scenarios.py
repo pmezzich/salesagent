@@ -98,9 +98,20 @@ def _porcelain_paths(lines: list[str]) -> list[str]:
     return [_norm(line[3:].split(" -> ")[-1]) for line in lines if len(line) > 3]
 
 
-def changed_paths(base_ref: str) -> list[str]:
-    """Committed changes vs merge-base plus uncommitted working-tree changes."""
+def changed_paths(base_ref: str) -> list[str] | None:
+    """Committed changes vs merge-base plus uncommitted working-tree changes.
+
+    ``None`` means there is no merge-base with ``base_ref`` — the caller bails
+    instead of diffing. ``_git`` runs with ``check=False``, so a ``merge-base``
+    that fails (shallow clone, unrelated history) returns "", and the range
+    ``f"{merge_base}..HEAD"`` collapses to ``"..HEAD"`` — which git resolves to
+    HEAD..HEAD: exit 0, empty diff. The committed half of the change set would
+    vanish and the tool would print its all-clear on a branch that DID edit BDD
+    files, the exact silent pass this check exists to kill.
+    """
     merge_base = _git("merge-base", "HEAD", base_ref)
+    if not merge_base:
+        return None
     committed = _git("diff", "--name-only", f"{merge_base}..HEAD").splitlines()
     working = _porcelain_paths(_git("status", "--porcelain").splitlines())
     seen: list[str] = []
@@ -288,7 +299,14 @@ def main() -> int:
         if base_ref is None:
             print("check-dormant: no usable base ref (tried upstream/main, origin/main); use --base or --all")
             return 0
-        touched = [p for p in changed_paths(base_ref) if is_bdd_relevant(p)]
+        changed = changed_paths(base_ref)
+        if changed is None:
+            print(
+                f"check-dormant: no merge-base with {base_ref} (shallow clone, or unrelated history); "
+                "fetch more history (git fetch --unshallow), or use --base/--all"
+            )
+            return 0
+        touched = [p for p in changed if is_bdd_relevant(p)]
         if not touched:
             print(f"check-dormant: no BDD-relevant changes vs {base_ref} — nothing to check")
             return 0
