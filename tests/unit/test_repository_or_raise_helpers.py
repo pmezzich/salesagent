@@ -7,6 +7,8 @@ that the helper returns the entity when present and raises the correct typed
 ``AdCPNotFoundError`` subclass (with the id in the message) when absent.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -28,20 +30,54 @@ def _repo_with_first(repo_cls, first_value):
     return repo_cls(session, "tenant-1")
 
 
+def _repo_over_mocked_session(raw_packages: list[dict]) -> tuple[MediaBuyRepository, MagicMock, MagicMock]:
+    """A repo over a mocked session, plus the MediaBuy its buy load resolves to.
+
+    ``session.scalars(...).first`` is deliberately left unprogrammed: the two
+    scaffolds below own that, because it is where the repository's internal
+    query ORDER is encoded and the single-package and bulk paths walk different
+    orders. Nothing else about the fixture differs between them, so it lives
+    here once.
+    """
+    media_buy = MagicMock()
+    media_buy.raw_request = {"packages": raw_packages}
+    session = MagicMock()
+    return MediaBuyRepository(session, "tenant-1"), session, media_buy
+
+
 def _repo_with_raw_packages(raw_packages: list[dict]) -> tuple[MediaBuyRepository, MagicMock]:
     """Build a repo whose row lookup misses, then resolves the owning MediaBuy.
 
-    Encodes the repository's internal query ORDER once: ``get_package`` /
+    Encodes the SINGLE-package query ORDER once: ``get_package`` /
     ``_find_raw_package`` first query the ``media_packages`` row (miss → None),
     then load the ``MediaBuy`` to read ``raw_request`` — hence
     ``side_effect = [None, media_buy]``. Returns ``(repo, session)`` so callers
     can assert on ``session.add`` / ``session.flush``.
     """
-    media_buy = MagicMock()
-    media_buy.raw_request = {"packages": raw_packages}
-    session = MagicMock()
+    repo, session, media_buy = _repo_over_mocked_session(raw_packages)
     session.scalars.return_value.first.side_effect = [None, media_buy]
-    return MediaBuyRepository(session, "tenant-1"), session
+    return repo, session
+
+
+@contextmanager
+def _repo_for_bulk_guard(raw_packages: list[dict]) -> Iterator[tuple[MediaBuyRepository, MagicMock]]:
+    """Build a repo for the BULK guard: every row lookup misses, the buy loads once.
+
+    Sibling of ``_repo_with_raw_packages`` encoding the OTHER query order once:
+    ``packages_exist_or_raise`` resolves ``raw_request`` through a single
+    ``_raw_packages_by_id`` buy load and probes each package via ``get_package``,
+    so the canonical row lookups are stubbed to miss at the method (not through
+    the session) and the session's only query is that one buy load — hence
+    ``return_value`` rather than the per-package ``side_effect`` sequence above.
+    A reorder in ``packages_exist_or_raise`` / ``_raw_packages_by_id`` now
+    touches this one place instead of every bulk test. Yields
+    ``(repo, session)`` so callers can assert on the query count and on
+    ``session.add`` / ``session.flush``.
+    """
+    repo, session, media_buy = _repo_over_mocked_session(raw_packages)
+    session.scalars.return_value.first.return_value = media_buy
+    with patch.object(repo, "get_package", return_value=None):
+        yield repo, session
 
 
 class TestMediaBuyOrRaise:
@@ -122,24 +158,15 @@ class TestMediaBuyOrRaise:
         row lookups stubbed to miss, the only session query left is the single
         buy load in ``_raw_packages_by_id``; a per-package refetch would make
         it k."""
-        media_buy = MagicMock()
-        media_buy.raw_request = {"packages": [{"package_id": "pkg-a"}, {"package_id": "pkg-b"}]}
-        session = MagicMock()
-        session.scalars.return_value.first.return_value = media_buy
-        repo = MediaBuyRepository(session, "tenant-1")
-        with patch.object(repo, "get_package", return_value=None):
+        raw = [{"package_id": "pkg-a"}, {"package_id": "pkg-b"}]
+        with _repo_for_bulk_guard(raw) as (repo, session):
             repo.packages_exist_or_raise("mb-1", ["pkg-a", "pkg-b"])  # no raise: both raw_request-only
         assert session.scalars.return_value.first.call_count == 1
 
     def test_packages_exist_or_raise_raises_on_missing_without_writing(self):
         """A package present in neither store raises PACKAGE_NOT_FOUND with the
         context echoed; the read-only bulk guard never materializes a row."""
-        media_buy = MagicMock()
-        media_buy.raw_request = {"packages": [{"package_id": "pkg-a"}]}
-        session = MagicMock()
-        session.scalars.return_value.first.return_value = media_buy
-        repo = MediaBuyRepository(session, "tenant-1")
-        with patch.object(repo, "get_package", return_value=None):
+        with _repo_for_bulk_guard([{"package_id": "pkg-a"}]) as (repo, session):
             with pytest.raises(AdCPPackageNotFoundError) as exc:
                 repo.packages_exist_or_raise("mb-1", ["pkg-a", "pkg-missing"], context={"context_id": "ctx-11"})
         assert exc.value.error_code == "PACKAGE_NOT_FOUND"

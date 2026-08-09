@@ -4,16 +4,45 @@ Error-path steps grade the WIRE contract (Error Verification Policy,
 tests/CLAUDE.md): ``dispatch_request`` stores the normalized ``TransportResult``
 on ``ctx['result']``, and its ``wire_error_envelope`` is the buyer-facing
 two-layer ``{adcp_error, errors[]}`` shape. Steps read that via the ``_wire_*``
-accessors (or ``TransportResult.assert_wire_error`` for a full code assertion),
-never the lossy reconstructed ``ctx['error']`` — which is only a fallback for
-the handful of message/existence steps that predate wire-first grading.
+accessors, or hand the whole grading job to a ``TransportResult`` grader —
+``assert_wire_error`` for a full code assertion, ``assert_wire_recovery`` /
+``assert_wire_is_adcp_envelope`` for the code-free ones. Never the lossy
+reconstructed ``ctx['error']`` — which is only a fallback for the handful of
+message/existence steps that predate wire-first grading.
+
+A step must never read a value OUT of the envelope and feed it back IN as the
+expectation: an arm graded against the thing under test cannot fail. That is
+why the recovery/shape steps take a code-free grader instead of passing
+``_wire_code(ctx)`` to ``assert_wire_error``.
 """
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pytest_bdd import parsers, then
 
+if TYPE_CHECKING:  # import-cycle-free: annotations are strings under PEP 563
+    from tests.harness.transport import TransportResult
+
 # ── Helpers ─────────────────────────────────────────────────────────
+
+
+def _wire_result(ctx: dict) -> TransportResult:
+    """Return the dispatched ``TransportResult`` for steps that delegate to its graders.
+
+    Companion to ``_wire_envelope``: steps that hand the whole grading job to a
+    harness grader (``assert_wire_error`` / ``assert_wire_recovery`` /
+    ``assert_wire_is_adcp_envelope``) need the result object, not the parsed
+    envelope. Raises a named AssertionError rather than a bare ``KeyError`` when
+    the When step never dispatched, so the failure says which step is missing.
+    """
+    result = ctx.get("result")
+    assert result is not None, (
+        "No TransportResult on ctx['result'] — the When step did not dispatch through a transport. "
+        f"ctx keys: {sorted(ctx)}"
+    )
+    return result
 
 
 def _wire_envelope(ctx: dict) -> dict | None:
@@ -399,15 +428,13 @@ def then_error_recovery(ctx: dict, recovery: str) -> None:
 def then_error_recovery_correctable(ctx: dict) -> None:
     """Assert recovery=correctable on the wire error envelope.
 
-    Grades only recovery through the harness ``assert_wire_error``; the
-    scenario's separate ``the error code should be "X"`` step pins the code on
-    the wire (#1417). The envelope's own code is read solely to satisfy the
-    grader's positional arg — the same shape as uc002 ``_assert_error_outcome``'s
-    suggestion-only path — so ``recovery`` is the value actually under test.
+    Routes through the code-free harness grader ``assert_wire_recovery``, which
+    owns the envelope-presence guard and the two-layer read. ``correctable`` is
+    the only expectation crossing the boundary, so it is the value actually
+    under test; the scenario's separate ``the error code should be "X"`` step
+    pins the code on the wire (#1417).
     """
-    code = _wire_code(ctx)
-    assert code is not None, f"No wire error envelope captured — error: {ctx.get('error')!r}"
-    ctx["result"].assert_wire_error(code, recovery="correctable")
+    _wire_result(ctx).assert_wire_recovery("correctable")
 
 
 @then("the response should echo the context.correlation_id unchanged")
@@ -426,19 +453,15 @@ def then_error_echoes_correlation_id(ctx: dict) -> None:
 def then_error_is_structured_adcp_shape(ctx: dict) -> None:
     """Assert the failure surfaced as the AdCP two-layer envelope, not a 500.
 
-    Routes through the harness ``assert_wire_error`` with ``recovery`` omitted,
-    so the envelope's recovery is graded against the PINNED enum's classification
-    for its code — non-vacuous: a 500 / non-AdCP body has no ``wire_error_envelope``
-    and fails, and a recovery that drifts from the spec classification fails too.
-    The scenario's separate ``the error code should be "X"`` step pins the code
-    itself (#1417), so the code is not re-graded here.
+    Routes through the code-free harness grader ``assert_wire_is_adcp_envelope``,
+    which grades the two-layer shape and checks the envelope's recovery against
+    the PINNED enum's classification for its code — non-vacuous: a 500 /
+    non-AdCP body has no ``wire_error_envelope`` and fails, layers that disagree
+    fail, a non-canonical code fails, and a recovery that drifts from the spec
+    classification fails. The scenario's separate ``the error code should be
+    "X"`` step pins the code itself (#1417), so the code is not graded here.
     """
-    code = _wire_code(ctx)
-    assert code is not None, (
-        f"Expected the AdCP two-layer error envelope, got no wire envelope "
-        f"(a 500 or non-AdCP body) — error: {ctx.get('error')!r}"
-    )
-    ctx["result"].assert_wire_error(code)
+    _wire_result(ctx).assert_wire_is_adcp_envelope()
 
 
 @then('the error should include a "suggestion" field')
