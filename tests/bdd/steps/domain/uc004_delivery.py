@@ -40,12 +40,22 @@ def _parse_json_list(text: str) -> list[str]:
     return json.loads(text)
 
 
+def _raw_body_from_kwargs(kwargs: dict[str, Any]) -> Any:
+    """The pre-serialized body a sender POSTed, whichever kwarg carried it.
+
+    ``requests`` spells it ``data=`` and ``httpx`` spells it ``content=``; both
+    senders pass transmitted bytes so the signed bytes are the transmitted bytes.
+    One accessor so a third spelling is taught in one place rather than two.
+    """
+    return kwargs.get("data") or kwargs.get("content")
+
+
 def _parse_call_payload(call: Any) -> dict[str, Any]:
     """Parse one mocked POST call's payload from its wire bytes (or legacy json=)."""
     kwargs = call[1]
     payload = kwargs.get("json")
     if payload is None:
-        raw = kwargs.get("data") or kwargs.get("content")
+        raw = _raw_body_from_kwargs(kwargs)
         if raw is None:
             return {}
         payload = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
@@ -61,7 +71,7 @@ def _get_last_webhook_body_bytes(ctx: dict) -> bytes:
     mock_post = ctx["env"].mock["post"]
     assert mock_post.called, "No webhook POST was made"
     call_kwargs = mock_post.call_args_list[-1][1]
-    raw = call_kwargs.get("data") or call_kwargs.get("content")
+    raw = _raw_body_from_kwargs(call_kwargs)
     assert raw is not None, f"Webhook POST had no body bytes: {call_kwargs}"
     return raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
 
