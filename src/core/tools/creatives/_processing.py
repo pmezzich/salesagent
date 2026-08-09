@@ -18,7 +18,7 @@ from adcp.types import CreativeAsset
 from adcp.types import Error as AdCPErrorDetail
 from pydantic import BaseModel
 
-from src.core.exceptions import AdCPConfigurationError, to_wire_error_code
+from src.core.exceptions import AdCPConfigurationError, RecoveryHint, to_wire_error_code
 from src.core.helpers import _extract_format_info, _validate_creative_assets
 from src.core.schemas import CreativeStatusEnum, SyncCreativeResult
 from src.core.validation_helpers import run_async_in_sync_context
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def _failed_sync_result(
-    creative_id: str, error_msg: str, *, recovery: str | None = None, code: str = "SERVICE_UNAVAILABLE"
+    creative_id: str, error_msg: str, *, recovery: RecoveryHint | None = None, code: str = "SERVICE_UNAVAILABLE"
 ) -> SyncCreativeResult:
     """Build a SyncCreativeResult for a failed creative sync operation.
 
