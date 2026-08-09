@@ -2554,7 +2554,7 @@ _KNOWN_ENVELOPE_KEYS = frozenset({"message", "success", "status", "task_id", "co
 _UNMODELED_REQUIRED = frozenset({"confirmed_at", "revision"})
 
 
-def _load_get_media_buys_response_schema() -> dict:
+def _load_get_media_buys_response_schema() -> dict[str, Any]:
     """Load the authoritative bundled AdCP get-media-buys-response JSON Schema.
 
     adcp==6.6.0 ships it at ``_schemas/3.1/bundled/media-buy/get-media-buys-response.json``;
@@ -2671,7 +2671,7 @@ def then_response_schema_valid_get_media_buys(ctx: dict) -> None:
     """
     from jsonschema.validators import Draft7Validator
 
-    from src.core.schemas import GetMediaBuysResponse
+    from src.core.schemas._base import GetMediaBuysResponse
     from tests.bdd.steps._outcome_helpers import wire_dict
 
     wire = wire_dict(ctx)
