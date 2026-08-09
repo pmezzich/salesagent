@@ -105,6 +105,33 @@ def _assert_log_redacted(mock_logger) -> None:
     )
 
 
+def _assert_registration_log_withholds_credential(mock_logger) -> None:
+    """Assert the media_buy_create registration log ran and carried no credential.
+
+    Deliberately NOT ``_assert_log_redacted``. The two DB-model sites are handed a
+    ``PushNotificationConfig`` whose own repr masks the token, so only the
+    ``REDACTED`` sentinel can tell a redacted log from a raw one — there, sentinel
+    presence is the load-bearing assert. This site is handed the raw A2A wire dict
+    and withholds by CONSTRUCTION instead: it passes the logger only the config id
+    and ``webhook_url_for_log(url)``, never the dict or its ``authentication``
+    blob. Nothing is redacted here because nothing sensitive is handed over, so
+    what must be pinned is the absence — and with no masking repr in the way,
+    absence is a real oracle.
+    """
+    logged = _rendered(mock_logger.info.call_args_list)
+    assert _SECRET not in logged, "buyer webhook credential leaked to the logs (#1617)"
+    assert _SHORT_SECRET not in logged, "buyer webhook credential leaked to the logs (#1617)"
+    pnc_calls = _pnc_info_calls(mock_logger)
+    assert pnc_calls, (
+        "no push-notification-config log call was emitted — the log site did not run (test guards nothing)"
+    )
+    # Hand the raw wire dict to the logger and all three of these appear together;
+    # that is the revert this guards.
+    rendered_pnc = _rendered(pnc_calls)
+    assert "authentication" not in rendered_pnc, "the registration log handed the authentication blob to the logger"
+    assert "credentials" not in rendered_pnc, "the registration log handed the credential field to the logger"
+
+
 def _run_create_media_buy_with_pnc(pnc: dict):
     """Drive the real create-media-buy registration path, module logger patched.
 
@@ -126,62 +153,52 @@ def _run_create_media_buy_with_pnc(pnc: dict):
 
 
 @pytest.mark.requires_db
-def test_create_media_buy_registration_log_redacts_webhook_credential(integration_db):
+def test_create_media_buy_registration_log_withholds_webhook_credential(integration_db):
     """A non-dry-run create with a credential-bearing push_notification_config
-    reaches the registration log; that log must carry the redacted view, never the
-    credential. Deletion oracle: reverting the site to log the raw config leaks
-    ``_SECRET`` here (this site receives the A2A wire dict, which has no masking
-    repr, so both assertions bite).
+    reaches the registration log; that log must never carry the credential.
+
+    This site withholds by construction rather than by redaction — it hands the
+    logger only the config id and ``webhook_url_for_log(url)``. Deletion oracle:
+    pass ``push_notification_config`` itself into that ``logger.info`` call and the
+    assertions redden, because this site receives the A2A wire dict and no masking
+    repr stands between the credential and the log.
     """
     pnc = _wire_pnc(id="pnc_redact", credentials=_SECRET)
     result, mock_logger = _run_create_media_buy_with_pnc(pnc)
 
     assert isinstance(result.response, CreateMediaBuySuccess)
-    _assert_log_redacted(mock_logger)
+    _assert_registration_log_withholds_credential(mock_logger)
 
 
 @pytest.mark.requires_db
 def test_create_media_buy_survives_sdk_rejected_credential_and_withholds_it(integration_db):
     """A wire credential the SDK schema rejects must neither crash creation nor leak.
 
-    Pins the ``except ValidationError`` fallback at media_buy_create's
-    registration log site — the branch that regressed CI in round 3 (an 18-char
-    e2e credential made ``model_validate`` raise and the media buy went to
-    ``failed``; fixed in 947bdcd4). The sibling test above feeds a >=32-char
-    credential, so without this case the fallback is never executed by the suite.
+    The registration site does not validate the wire config against the SDK model,
+    so a credential the SDK would refuse still registers cleanly. That is the shape
+    which regressed CI in round 3: an 18-char e2e credential made
+    ``model_validate`` raise and the media buy went to ``failed``. Re-introducing a
+    validate call at this site without a fallback reddens assertion (1).
 
-    Deletion oracles: drop the try/except and (1) reddens (creation crashes);
-    make the fallback log the raw wire dict and (2) reddens (this site gets the
-    A2A wire dict — no masking repr in the way, the secret lands in the log);
-    drop the log line and (3) reddens, so the pass is not vacuous.
+    The sibling test above feeds a >=32-char credential, so without this case the
+    SDK-rejected wire shape is never exercised by the suite.
     """
     from adcp import PushNotificationConfig
     from pydantic import ValidationError
 
     pnc = _wire_pnc(id="pnc_short", credentials=_SHORT_SECRET)
-    # Premise guard: the fallback only runs if the SDK actually rejects this
-    # credential. If a future SDK bump relaxes the >=32-char floor, fail loudly
-    # here instead of silently degrading into a duplicate of the sibling test.
+    # Premise guard: this input only exercises the SDK-rejected shape while the SDK
+    # actually refuses it. If a future SDK bump relaxes the >=32-char floor, fail
+    # loudly here instead of silently degrading into a duplicate of the sibling test.
     with pytest.raises(ValidationError):
         PushNotificationConfig.model_validate(pnc)
 
     result, mock_logger = _run_create_media_buy_with_pnc(pnc)
 
-    # (1) A redaction built for a log line must never break media-buy creation.
+    # (1) An SDK-rejected credential must not break media-buy creation.
     assert isinstance(result.response, CreateMediaBuySuccess)
-    # (2) The secret is withheld on the fallback path too.
-    assert _SHORT_SECRET not in _rendered(mock_logger.info.call_args_list), (
-        "buyer webhook credential leaked on the ValidationError fallback path (#1617)"
-    )
-    # (3) The registration log line still ran, carrying the fallback's all-None view
-    # (redact_push_notification_config(None) — the closed record with every field
-    # None, which is what the fallback passes when model_validate rejected the wire).
-    pnc_calls = _pnc_info_calls(mock_logger)
-    assert pnc_calls, "no push-notification-config log call was emitted — the fallback assertions are vacuous"
-    _all_none_view = {"id": None, "url": None, "authentication_type": None, "authentication": None}
-    assert any(len(call.args) > 1 and call.args[1] == _all_none_view for call in pnc_calls), (
-        "the fallback did not log the all-None redacted view"
-    )
+    # (2) The log ran and withheld the credential on this path too.
+    _assert_registration_log_withholds_credential(mock_logger)
 
 
 @pytest.fixture
