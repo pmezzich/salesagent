@@ -25,6 +25,10 @@ import httpx
 from adcp import get_adcp_spec_version
 
 from src.core.webhook_body import sign_or_serialize
+from src.core.webhook_validator import (
+    reject_unsafe_outbound_webhook_url,
+    webhook_url_for_log,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -354,9 +358,13 @@ class WebhookDeliveryService:
                 # Send to all configured webhooks
                 sent_count = 0
                 for config in configs:
+                    safe_url = webhook_url_for_log(config.url)
                     # Skip auth-blocked endpoints (UC-004-EXT-G-07)
                     if isinstance(getattr(config, "auth_blocked_at", None), datetime):
-                        logger.warning(f"⚠️ Auth blocked for {config.url}, skipping until credentials reconfigured")
+                        logger.warning(
+                            "⚠️ Auth blocked for %s, skipping until credentials reconfigured",
+                            safe_url,
+                        )
                         continue
 
                     endpoint_key = f"{tenant_id}:{config.url}"
@@ -374,7 +382,14 @@ class WebhookDeliveryService:
 
                     # Check circuit breaker
                     if not circuit_breaker.can_attempt():
-                        logger.warning(f"⚠️ Circuit breaker OPEN for {config.url}, skipping webhook delivery")
+                        logger.warning(
+                            "⚠️ Circuit breaker OPEN for %s, skipping webhook delivery",
+                            safe_url,
+                        )
+                        continue
+
+                    # Send-time SSRF gate before enqueue/POST (registration may skip DNS).
+                    if self._reject_unsafe_outbound_url(config.url, circuit_breaker):
                         continue
 
                     # Add to queue (bounded)
@@ -385,7 +400,7 @@ class WebhookDeliveryService:
                     }
 
                     if not queue.enqueue(webhook_data):
-                        logger.warning(f"⚠️ Queue full for {config.url}, webhook dropped")
+                        logger.warning("⚠️ Queue full for %s, webhook dropped", safe_url)
                         continue
 
                     # Deliver from queue with enhanced features
@@ -402,6 +417,14 @@ class WebhookDeliveryService:
         except Exception as e:
             logger.error(f"❌ Error in webhook delivery: {e}", exc_info=True)
             return False
+
+    def _reject_unsafe_outbound_url(self, url: str, circuit_breaker: CircuitBreaker) -> bool:
+        """Return True when outbound URL fails SSRF (caller must skip delivery)."""
+        rejected, _error_msg = reject_unsafe_outbound_webhook_url(url, log=logger, kind="Application")
+        if rejected:
+            circuit_breaker.record_failure()
+            return True
+        return False
 
     def _deliver_with_backoff(
         self,
@@ -432,6 +455,7 @@ class WebhookDeliveryService:
         # message is ``{unix_timestamp}.{raw_http_body}`` (the previous ISO
         # form here never matched a spec-compliant verifier).
         timestamp = int(webhook_data["timestamp"].timestamp())
+        safe_url = webhook_url_for_log(config.url)
 
         webhook_secret = getattr(config, "webhook_secret", None)
         headers = {
@@ -450,7 +474,10 @@ class WebhookDeliveryService:
         # X-AdCP-Timestamp on the signed branch).
         strong_secret = bool(webhook_secret and self._verify_secret_strength(webhook_secret))
         if webhook_secret and not strong_secret:
-            logger.warning(f"⚠️ Webhook secret for {config.url} is too weak (min 32 characters required)")
+            logger.warning(
+                "⚠️ Webhook secret for %s is too weak (min 32 characters required)",
+                safe_url,
+            )
         body_bytes = sign_or_serialize(headers, payload, webhook_secret if strong_secret else None, timestamp=timestamp)
 
         # Add authentication
@@ -467,8 +494,8 @@ class WebhookDeliveryService:
                     logger.debug(f"Retrying webhook delivery after {delay:.2f}s (attempt {attempt + 1}/{max_retries})")
                     time.sleep(delay)
 
-                # Send webhook
-                with httpx.Client(timeout=10.0) as client:
+                # Send webhook — never follow redirects (open-redirect SSRF bypass).
+                with httpx.Client(timeout=10.0, follow_redirects=False) as client:
                     # content= (not json=) so the signed bytes ARE the sent bytes
                     response = client.post(
                         config.url,
@@ -477,31 +504,49 @@ class WebhookDeliveryService:
                     )
 
                     if 200 <= response.status_code < 300:
-                        logger.debug(f"Webhook delivered to {config.url} (status: {response.status_code})")
+                        logger.debug(
+                            "Webhook delivered to %s (status: %s)",
+                            safe_url,
+                            response.status_code,
+                        )
                         circuit_breaker.record_success()
                         return True
 
                     # Client errors (4xx): do NOT retry — the request is invalid
                     if 400 <= response.status_code < 500:
                         logger.warning(
-                            f"Webhook delivery to {config.url} returned "
-                            f"client error {response.status_code}, will not retry"
+                            "Webhook delivery to %s returned client error %s, will not retry",
+                            safe_url,
+                            response.status_code,
                         )
                         circuit_breaker.record_failure()
                         return False
 
                     logger.warning(
-                        f"Webhook delivery to {config.url} returned "
-                        f"status {response.status_code} "
-                        f"(attempt: {attempt + 1}/{max_retries})"
+                        "Webhook delivery to %s returned status %s (attempt: %s/%s)",
+                        safe_url,
+                        response.status_code,
+                        attempt + 1,
+                        max_retries,
                     )
 
             except httpx.TimeoutException:
-                logger.warning(f"Webhook delivery to {config.url} timed out (attempt: {attempt + 1}/{max_retries})")
+                logger.warning(
+                    "Webhook delivery to %s timed out (attempt: %s/%s)",
+                    safe_url,
+                    attempt + 1,
+                    max_retries,
+                )
             except httpx.RequestError as e:
-                logger.warning(f"Webhook delivery to {config.url} failed: {e} (attempt: {attempt + 1}/{max_retries})")
+                logger.warning(
+                    "Webhook delivery to %s failed: %s (attempt: %s/%s)",
+                    safe_url,
+                    e,
+                    attempt + 1,
+                    max_retries,
+                )
             except Exception as e:
-                logger.error(f"Unexpected error delivering to {config.url}: {e}", exc_info=True)
+                logger.error("Unexpected error delivering to %s: %s", safe_url, e, exc_info=True)
                 break
 
         # All retries failed
