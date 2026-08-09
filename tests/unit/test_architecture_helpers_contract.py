@@ -15,6 +15,7 @@ from tests.unit._architecture_helpers import (
     iter_git_tracked_files,
     postgres_image_ref,
     postgres_tag_pattern_map,
+    raw_wrapper_param_names,
     uv_version_pattern_map,
 )
 
@@ -173,3 +174,29 @@ def test_git_available_never_engages_fallback(tmp_path: Path) -> None:
     assert names == {"tracked.py"}, (
         f"with working git the helper must yield exactly the tracked set (hermetic), got {sorted(names)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# raw_wrapper_param_names — shared by the REST/A2A transport-parity guards.
+# ---------------------------------------------------------------------------
+
+
+def _sample_raw_wrapper(media_buy_id, tags=None, *args, ctx=None, identity=None, fields=None, **kwargs):
+    """Stand-in for a ``*_raw`` wrapper covering every parameter kind."""
+
+
+@pytest.mark.arch_guard
+def test_raw_wrapper_param_names_drops_caller_supplied_plumbing() -> None:
+    names = raw_wrapper_param_names(_sample_raw_wrapper, plumbing={"ctx", "identity"})
+    assert names == {"media_buy_id", "tags", "fields"}, (
+        f"expected buyer-facing params only (plumbing + *args/**kwargs excluded), got {sorted(names)}"
+    )
+
+
+@pytest.mark.arch_guard
+def test_raw_wrapper_param_names_plumbing_set_is_per_caller() -> None:
+    """Each guard owns its plumbing set — a wider set must drop strictly more params."""
+    a2a_like = raw_wrapper_param_names(_sample_raw_wrapper, plumbing={"ctx", "identity"})
+    rest_like = raw_wrapper_param_names(_sample_raw_wrapper, plumbing={"ctx", "identity", "fields"})
+    assert a2a_like - rest_like == {"fields"}
+    assert not rest_like - a2a_like

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import functools
+import inspect
 import os
 import re
 import subprocess
@@ -297,6 +298,35 @@ def iter_architecture_guard_trees(
         if tree is None:
             continue
         yield tree, rel
+
+
+# ---------------------------------------------------------------------------
+# Transport-parity signature helpers
+# ---------------------------------------------------------------------------
+
+
+def raw_wrapper_param_names(fn: Callable, *, plumbing: set[str]) -> set[str]:
+    """Buyer-facing parameters of a ``*_raw`` wrapper, minus transport *plumbing*.
+
+    Single source for the transport-parity guards that compare a raw wrapper's
+    signature against what one transport actually forwards
+    (``test_architecture_rest_body_completeness`` for the REST ``*Body`` models,
+    ``test_architecture_a2a_list_creatives_forwarding`` for the A2A skill
+    handler). Only POSITIONAL_OR_KEYWORD and KEYWORD_ONLY params count —
+    ``*args``/``**kwargs`` are not named buyer-facing fields.
+
+    ``plumbing`` is caller-supplied on purpose: it names the params that
+    transport resolves or injects server-side and therefore never binds from the
+    wire, and the sets legitimately differ per transport (REST also injects
+    ``raw_wire_payload`` from its ``raw_json_body`` dependency; A2A has no such
+    param). Passing it explicitly keeps that divergence visible at each guard
+    instead of hiding it in a shared default.
+    """
+    return {
+        name
+        for name, p in inspect.signature(fn).parameters.items()
+        if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) and name not in plumbing
+    }
 
 
 # ---------------------------------------------------------------------------

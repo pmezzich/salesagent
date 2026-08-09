@@ -3413,7 +3413,19 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
                 ctx["env"] = env
                 yield
         elif "T-UC-018-ext-c" in marker_names:
-            pytest.xfail("T-UC-018-ext-c list_creatives validation harness wiring is tracked in #1652")
+            # Routing this tag into the CreativeListEnv branch above does NOT make the
+            # scenario run: no step definition matches the UC-018 "the Buyer Agent sends
+            # a list_creatives request with <invalid_param>" family (the only near-match
+            # is the 'authenticated as "<principal_id>"' variant in
+            # test_uc018_list_creatives.py), so every row would raise
+            # StepDefinitionNotFoundError and be auto-xfailed by
+            # pytest_runtest_makereport anyway — after spinning up a DB per row. Going
+            # live needs the When-step handler plus over-cap Examples rows for the
+            # newly-capped siblings (statuses, format_ids, concept_ids, tags, tags_any,
+            # media_buy_ids, accounts, assigned_to_packages — the outline currently
+            # carries only "creative_ids over max"), authored through the generated
+            # feature's merge source. Tracked in #1652.
+            pytest.xfail("T-UC-018-ext-c list_creatives validation steps are not implemented — tracked in #1652")
         else:
             pytest.xfail(
                 "UC-018 harness wired only for the @list-after-sync (#1405), @concept-id (#1407), "

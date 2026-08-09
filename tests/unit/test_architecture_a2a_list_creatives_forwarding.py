@@ -13,7 +13,7 @@ that runs on the merged filters) on A2A until #1511.
 
 This guard fails if the handler drops a ``list_creatives_raw`` parameter that is
 not explicitly allowlisted with a justification. It is a signature-derived parity
-check (the same shape ``test_capped_fields_stay_in_parity_with_sdk_list_fields``
+check (the same shape ``test_capped_fields_match_pinned_schema_array_filters``
 uses for the cap tuple), so a future param added to ``list_creatives_raw`` and
 dropped from the A2A handler fails CI instead of silently regressing.
 
@@ -29,11 +29,14 @@ its own raw-wrapper pairing and an allowlist audit of intentional omissions.
 from __future__ import annotations
 
 import ast
-import inspect
-from collections.abc import Callable
 
 from src.core.tools.creatives.listing import list_creatives_raw
-from tests.unit._architecture_helpers import iter_call_expressions, parse_module, repo_root
+from tests.unit._architecture_helpers import (
+    iter_call_expressions,
+    parse_module,
+    raw_wrapper_param_names,
+    repo_root,
+)
 
 _A2A_SERVER = repo_root() / "src" / "a2a_server" / "adcp_a2a_server.py"
 _HANDLER = "_handle_list_creatives_skill"
@@ -49,15 +52,6 @@ _TRANSPORT_PARAMS = {"ctx", "identity"}
 # Allowlisted omissions: {param_name: justification}. Can only SHRINK — every
 # entry needs a real reason, never a blanket escape.
 _ALLOWLIST: dict[str, str] = {}
-
-
-def _raw_param_names(fn: Callable) -> set[str]:
-    """Buyer-facing keyword/positional params of a raw wrapper, minus plumbing."""
-    return {
-        name
-        for name, p in inspect.signature(fn).parameters.items()
-        if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) and name not in _TRANSPORT_PARAMS
-    }
 
 
 def _handler_forwarded_kwargs() -> set[str]:
@@ -84,7 +78,7 @@ def _handler_forwarded_kwargs() -> set[str]:
 
 def test_a2a_list_creatives_handler_forwards_all_raw_params():
     """``_handle_list_creatives_skill`` must forward every param ``list_creatives_raw`` accepts."""
-    expected = _raw_param_names(list_creatives_raw)
+    expected = raw_wrapper_param_names(list_creatives_raw, plumbing=_TRANSPORT_PARAMS)
     forwarded = _handler_forwarded_kwargs()
     missing = expected - forwarded - set(_ALLOWLIST)
     assert not missing, (
@@ -96,7 +90,7 @@ def test_a2a_list_creatives_handler_forwards_all_raw_params():
 
 def test_a2a_forwarding_allowlist_has_no_stale_entries():
     """Allowlist entries must be real raw-wrapper params still missing from the handler."""
-    expected = _raw_param_names(list_creatives_raw)
+    expected = raw_wrapper_param_names(list_creatives_raw, plumbing=_TRANSPORT_PARAMS)
     forwarded = _handler_forwarded_kwargs()
     stale = []
     for param in _ALLOWLIST:

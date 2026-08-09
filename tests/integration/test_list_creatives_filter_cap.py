@@ -7,7 +7,9 @@ SQL IN (...) query. Uses the CreativeListEnv harness, mirroring
 test_list_creatives_auth.py.
 """
 
+import json
 import typing
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -148,22 +150,74 @@ async def test_a2a_list_creatives_handler_forwards_projection_and_enrichment_par
     assert call_kwargs["include_sub_assets"] is True
 
 
-def test_capped_fields_stay_in_parity_with_sdk_list_fields():
-    """_CAPPED_FILTER_FIELDS is hand-maintained — pin it against the SDK.
+# The vendored AdCP schema is the authority for what CreativeFilters declares.
+# The installed adcp wheel's Pydantic models are code-generated FROM that spec, so
+# deriving the expected set from ``CreativeFilters.model_fields`` grades one derived
+# artifact against another — a lockstep restatement that moves whenever the wheel
+# moves. The JSON is the source; the wheel gets a separate cross-check below.
+# Advance the pin with tests/fixtures/adcp_schemas_pinned/_refresh.py.
+_PINNED_CREATIVE_FILTERS = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "adcp_schemas_pinned" / "core" / "creative-filters.json"
+)
 
-    If a future adcp pin adds a list-typed field to CreativeFilters, this
-    fails and the new field must be added to the cap (or explicitly excluded
-    here with a reason) — no list filter can slip through uncapped silently.
-    """
-    sdk_list_fields = set()
+
+def _pinned_array_filter_fields() -> set[str]:
+    """Array-typed properties of the pinned ``creative-filters.json`` schema."""
+    if not _PINNED_CREATIVE_FILTERS.exists():
+        raise AssertionError(
+            f"Pinned schema not vendored: {_PINNED_CREATIVE_FILTERS}. "
+            "Re-run tests/fixtures/adcp_schemas_pinned/_refresh.py to vendor it."
+        )
+    schema = json.loads(_PINNED_CREATIVE_FILTERS.read_text(encoding="utf-8"))
+    fields = {name for name, spec in schema["properties"].items() if spec.get("type") == "array"}
+    assert fields, f"non-vacuity: {_PINNED_CREATIVE_FILTERS.name} declared no array-typed properties"
+    return fields
+
+
+def _sdk_list_filter_fields() -> set[str]:
+    """List-typed fields on the installed wheel's ``CreativeFilters`` model."""
+    names = set()
     for name, field in CreativeFilters.model_fields.items():
         annotation = field.annotation
         candidates = [annotation, *typing.get_args(annotation)]
         if any(typing.get_origin(c) is list for c in candidates):
-            sdk_list_fields.add(name)
+            names.add(name)
+    return names
 
-    assert sdk_list_fields == set(_CAPPED_FILTER_FIELDS), (
-        "CreativeFilters list-typed fields diverged from _CAPPED_FILTER_FIELDS — "
-        f"sdk-only: {sorted(sdk_list_fields - set(_CAPPED_FILTER_FIELDS))}, "
-        f"cap-only: {sorted(set(_CAPPED_FILTER_FIELDS) - sdk_list_fields)}"
+
+def test_capped_fields_match_pinned_schema_array_filters():
+    """_CAPPED_FILTER_FIELDS is hand-maintained — pin it against the vendored schema.
+
+    Every array-typed CreativeFilters property expands into an ``IN (...)``
+    predicate, so every one of them must be capped. If a future pin refresh adds
+    an array filter, this fails and the new field must be added to the cap (or
+    explicitly excluded here with a reason) — no list filter slips through
+    uncapped silently.
+    """
+    pinned = _pinned_array_filter_fields()
+    capped = set(_CAPPED_FILTER_FIELDS)
+
+    assert pinned == capped, (
+        f"{_PINNED_CREATIVE_FILTERS.name} array filters diverged from _CAPPED_FILTER_FIELDS — "
+        f"schema-only (uncapped, would expand into IN (...)): {sorted(pinned - capped)}, "
+        f"cap-only (not a schema array filter): {sorted(capped - pinned)}"
+    )
+
+
+def test_sdk_creative_filters_match_pinned_schema_array_filters():
+    """Cross-check: the installed adcp wheel agrees with the vendored pin.
+
+    Secondary to the cap parity above. Separating the two isolates the cause of a
+    failure: this one reddens when the installed wheel drifts from the vendored
+    schema (a pin bump landed in one place only), the cap test reddens when
+    production's hand-maintained tuple drifts from the schema.
+    """
+    pinned = _pinned_array_filter_fields()
+    sdk = _sdk_list_filter_fields()
+
+    assert sdk == pinned, (
+        "adcp wheel CreativeFilters list fields diverged from the vendored "
+        f"{_PINNED_CREATIVE_FILTERS.name} — wheel-only: {sorted(sdk - pinned)}, "
+        f"schema-only: {sorted(pinned - sdk)}. Re-run "
+        "tests/fixtures/adcp_schemas_pinned/_refresh.py if the adcp pin moved."
     )
