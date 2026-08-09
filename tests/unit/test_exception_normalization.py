@@ -171,7 +171,7 @@ def test_a2a_internal_error_message_is_sanitized_not_raw():
 
     err = _internal_error_for("message processing", leaky)
 
-    # The parseable prefix survives (storyboard runners key off it).
+    # The shared prefix survives (it keeps the five raise sites uniform).
     assert err.message.startswith("message processing failed: ")
     # ...but the raw exception text does not reach the wire message.
     assert_no_raw_exception_leak(err.message)

@@ -167,9 +167,9 @@ def _internal_error_for(operation: str, exc: Exception) -> InternalError:
     followed by ``normalize_to_adcp_error(exc).message`` — for an untyped
     exception the generic wire message, never the raw ``exc``; for a typed
     ``AdCPError`` (including the ``ValueError``/``PermissionError`` mappings)
-    that error's own message, forwarded unchanged. So storyboard runners can
-    parse the failure uniformly, and the untyped-exception text this sink exists
-    to contain never reaches the JSON-RPC wire.
+    that error's own message, forwarded unchanged. The shared prefix keeps the
+    five raise sites' operator-facing text uniform, and the untyped-exception
+    text this sink exists to contain never reaches the JSON-RPC wire.
 
     The four ``on_*_task_push_notification_config`` JSON-RPC protocol methods use
     this helper too — they have no async Task to carry a DataPart, so the two-layer
