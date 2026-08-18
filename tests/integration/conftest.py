@@ -6,6 +6,7 @@ These fixtures are for tests that require database and service integration.
 
 import os
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 
@@ -13,6 +14,7 @@ import psycopg2
 import pytest
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from sqlalchemy import create_engine, delete, select
+from sqlalchemy.orm import Session
 
 from src.admin.app import create_app
 
@@ -31,7 +33,7 @@ from tests.integration.migration_helpers import parse_postgres_url
 
 
 @contextmanager
-def bind_factory_session(factory, session):
+def bind_factory_session(factory: type, session: Session) -> Iterator[type]:
     """Temporarily bind a factory-boy ``factory`` to ``session``, restoring the
     previously-bound session on exit.
 

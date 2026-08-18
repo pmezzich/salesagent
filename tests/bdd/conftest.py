@@ -2830,6 +2830,7 @@ def _is_brand_shorthand_media_buy(marker_names: set[str]) -> bool:
 _UC003_STORYBOARD_WIRED: set[str] = {
     "T-UC-003-storyboard-media-buy-not-found",
     "T-UC-003-storyboard-package-not-found",
+    "T-UC-003-storyboard-package-not-found-preempts-budget",
 }
 
 # Admin scenarios have their own transport (Flask test_client / requests.Session).

@@ -325,6 +325,46 @@ class MediaBuyRepository:
         self._session.flush()
         return package
 
+    def create_package_from_config(
+        self,
+        media_buy_id: str,
+        package_id: str,
+        package_config: dict[str, Any],
+        *,
+        budget: Any = None,
+        bid_price: Any = None,
+    ) -> MediaPackage:
+        """Persist a dual-write package row from a raw create-path config.
+
+        The public write seam for the create path (``media_buy_create.py``):
+        builds the row via the shared ``_build_package_row`` and owns the
+        ``session.add``, so persistence stays in the repository layer and the
+        private builder keeps zero cross-module callers.
+
+        Distinct from ``create_package``, which takes ALREADY-COERCED
+        ``Decimal`` budget/bid_price plus a separate ``pacing``. This method
+        takes the RAW values (a budget dict with ``total``/``pacing``, a bare
+        scalar, or ``None``) and routes them through the single coercion
+        authority — reusing ``create_package`` would re-open the budget-dict
+        split and the ``_to_decimal_or_none`` coercion that ``_build_package_row``
+        was extracted to centralize (#1736).
+
+        Deliberately does NOT flush: the create sites add packages in a loop
+        and flush ONCE after it (the create path needs the rows visible for the
+        line_item_id queries that follow), so a per-call flush would turn one
+        round trip into N. ``materialize_package`` flushes because its caller
+        needs the row back immediately.
+        """
+        package = self._build_package_row(
+            media_buy_id,
+            package_id,
+            package_config,
+            budget=budget,
+            bid_price=bid_price,
+        )
+        self._session.add(package)
+        return package
+
     @staticmethod
     def _build_package_row(
         media_buy_id: str,

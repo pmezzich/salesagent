@@ -469,9 +469,13 @@ def _update_media_buy_impl(
             # terminal-state check above (INVALID_STATE) run first, so they
             # preempt this guard; PACKAGE_NOT_FOUND in turn preempts the
             # budget / targeting validators below — a package's budget is
-            # meaningless if the package does not exist. (The PACKAGE-preempts-
-            # BUDGET ordering itself is a reasonable reading but ungraded — no
-            # storyboard pins it.) Spec grounding: AdCP 3.1.1 (adcp==6.6.0,
+            # meaningless if the package does not exist. The PACKAGE-preempts-
+            # BUDGET ordering is graded on every transport by the storyboard
+            # scenario "unknown package carrying a below-minimum budget returns
+            # PACKAGE_NOT_FOUND, not BUDGET_TOO_LOW" — it sends a package that
+            # is both absent AND under the seller minimum, so deleting this
+            # guard reddens it with BUDGET_TOO_LOW rather than passing.
+            # Spec grounding: AdCP 3.1.1 (adcp==6.6.0,
             # canonical per docs/adcp-spec-version.md) —
             # invalid_transitions.yaml Phase 3 (unknown_package), storyboard
             # scenario "unknown package_id returns PACKAGE_NOT_FOUND" in

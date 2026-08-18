@@ -1010,3 +1010,30 @@ def when_update_unknown_media_buy_paused(ctx: dict) -> None:
 @when("the Buyer Agent sends update_media_buy targeting the unknown package")
 def when_update_unknown_package(ctx: dict) -> None:
     _send_storyboard_update(ctx)
+
+
+# Below the CurrencyLimit.min_package_budget floor TenantFactory seeds
+# (100.00), so this budget WOULD raise BUDGET_TOO_LOW if the package
+# resolved. Without that the preemption scenario would pass vacuously — it
+# would be indistinguishable from the plain unknown-package scenario.
+_BELOW_MIN_PACKAGE_BUDGET = 0.50
+
+
+@when("the Buyer Agent sends update_media_buy targeting the unknown package with a below-minimum budget")
+def when_update_unknown_package_below_min_budget(ctx: dict) -> None:
+    """Absent package AND an under-floor package budget in ONE request.
+
+    Grades the precedence that lives in the shared ``_impl`` (so every
+    transport inherits it): the bulk package-existence guard
+    (``packages_exist_or_raise``) runs before the per-package budget
+    validators, so the buyer gets PACKAGE_NOT_FOUND — fix the reference
+    first — rather than a field-level budget error against a package that
+    does not exist.
+    """
+    kwargs = _ensure_update_defaults(ctx)
+    packages = kwargs.get("packages")
+    assert packages, (
+        "No packages in the pending update kwargs — the 'buyer references a package_id "
+        "that does not belong to the media buy' Given step must run first"
+    )
+    _send_storyboard_update(ctx, {"packages": [{**packages[0], "budget": _BELOW_MIN_PACKAGE_BUDGET}]})

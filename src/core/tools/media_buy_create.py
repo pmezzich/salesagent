@@ -2919,9 +2919,7 @@ async def _create_media_buy_impl(
             # Create MediaPackage records for structured querying
             # This enables the UI to display packages and creative assignments to work properly
             with MediaBuyUoW(tenant["tenant_id"]) as pkg_uow:
-                # FIXME(salesagent-9f2): package creation should use repository methods
-                assert pkg_uow.session is not None
-                session = pkg_uow.session
+                assert pkg_uow.media_buys is not None
                 for pkg_obj in pending_packages:
                     # Get paused state from package (adcp 2.12.0: replaced status enum with paused bool)
                     paused = getattr(pkg_obj, "paused", False)  # Default to False (not paused) if not present
@@ -2974,19 +2972,19 @@ async def _create_media_buy_impl(
                             )
                             break
 
-                    # Dual-write via the shared repository builder so the budget
-                    # dict → total/pacing split and the bool-rejecting / non-500
-                    # _to_decimal_or_none coercion live in ONE place (resolves
-                    # #1736). bid_price is sourced from pricing_info here.
+                    # Dual-write via the repository write seam so the budget
+                    # dict → total/pacing split, the bool-rejecting / non-500
+                    # _to_decimal_or_none coercion, and the persistence itself
+                    # live in ONE place (resolves #1736). bid_price is sourced
+                    # from pricing_info here.
                     bid_price_value = pricing_info_for_package.get("bid_price") if pricing_info_for_package else None
-                    db_package = MediaBuyRepository._build_package_row(
+                    pkg_uow.media_buys.create_package_from_config(
                         media_buy_id,
                         pkg_obj.package_id,
                         package_config,
                         budget=budget_value,
                         bid_price=bid_price_value,
                     )
-                    session.add(db_package)
 
                 # UoW auto-commits on clean exit
                 logger.info(f"✅ Created {len(pending_packages)} MediaPackage records")
@@ -3650,8 +3648,12 @@ async def _create_media_buy_impl(
         # This enables creative_assignments to work properly
         if req.packages or (response.packages and len(response.packages) > 0):
             with MediaBuyUoW(tenant["tenant_id"]) as auto_pkg_uow:
-                # FIXME(salesagent-9f2): package creation should use repository methods
+                # FIXME(salesagent-9f2): the package WRITES now go through the
+                # repository seam; the raw session is still reached for the
+                # post-loop flush that makes the rows visible to the
+                # line_item_id queries below.
                 assert auto_pkg_uow.session is not None
+                assert auto_pkg_uow.media_buys is not None
                 session = auto_pkg_uow.session
                 # Persist the adapter-reported packages (they carry the
                 # seller-assigned package_ids). When response.packages is
@@ -3700,20 +3702,20 @@ async def _create_media_buy_impl(
                         "impressions": impressions,  # Store impressions for display
                     }
 
-                    # Dual-write via the shared repository builder so the budget
-                    # dict → total/pacing split and the bool-rejecting / non-500
-                    # _to_decimal_or_none coercion live in ONE place (resolves
-                    # #1736). bid_price is sourced from pricing_info here.
+                    # Dual-write via the repository write seam so the budget
+                    # dict → total/pacing split, the bool-rejecting / non-500
+                    # _to_decimal_or_none coercion, and the persistence itself
+                    # live in ONE place (resolves #1736). bid_price is sourced
+                    # from pricing_info here.
                     budget_data = getattr(resp_package, "budget", None)
                     bid_price_value = pricing_info_for_package.get("bid_price") if pricing_info_for_package else None
-                    db_package = MediaBuyRepository._build_package_row(
+                    auto_pkg_uow.media_buys.create_package_from_config(
                         response.media_buy_id,
                         resp_package_id,
                         package_config,
                         budget=budget_data,
                         bid_price=bid_price_value,
                     )
-                    session.add(db_package)
 
                 session.flush()  # Flush so packages are visible for line_item_id queries below
                 logger.info(
