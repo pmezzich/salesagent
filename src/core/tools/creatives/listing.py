@@ -119,8 +119,8 @@ def _build_list_creatives_request(
     fields: list[str] | None = None,
     include_assignments: bool = False,
     limit: int = 50,
-    sort_by: str = "created_date",
-    sort_order: str = "desc",
+    sort_by: str | None = "created_date",
+    sort_order: str | None = "desc",
     context: ContextObject | None = None,
 ) -> "ListCreativesRequest":
     """Build a ListCreativesRequest from individual wire params.
@@ -167,6 +167,11 @@ def _build_list_creatives_request(
     valid_sort_order: Literal["asc", "desc"] = cast(
         Literal["asc", "desc"], sort_order if sort_order in ["asc", "desc"] else "desc"
     )
+    # sort_by/sort_order are `| None`: a transport that omits them forwards None
+    # rather than restating the literal, and this function — the single owner of
+    # the sort defaults — resolves it. (sort_order is resolved by the cast above.)
+    if sort_by is None:
+        sort_by = "created_date"
 
     # Enforce max limit
     effective_limit = min(limit, 1000)
@@ -609,8 +614,8 @@ def list_creatives_raw(
     include_sub_assets: bool = False,
     page: int = 1,
     limit: int = 50,
-    sort_by: str = "created_date",
-    sort_order: str = "desc",
+    sort_by: str | None = "created_date",
+    sort_order: str | None = "desc",
     context: ContextObject | None = None,  # Application level context per adcp spec
     ctx: Context | ToolContext | None = None,
     identity: ResolvedIdentity | None = None,
