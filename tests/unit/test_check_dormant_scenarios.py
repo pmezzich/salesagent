@@ -21,12 +21,12 @@ from __future__ import annotations
 
 import ast
 import importlib.util
-import re
 import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
+from typing import NamedTuple
 
 import pytest
 
@@ -56,6 +56,89 @@ def _load_script(filename: str) -> ModuleType:
 
 
 cds = _load_script("check_dormant_scenarios.py")
+
+
+#: The two split ops that together ARE ``xfail_taxonomy.scenario_name``.
+#: The index is the whole discriminator: both the collapse and the unrelated
+#: param PULL split on ``"["`` and sit a line apart in the same files, but the
+#: collapse keeps ``[0]`` (the function name) while the pull keeps ``[-1]``/``[1]``
+#: (the param id). A matcher that keys on anything else flags the wrong idiom.
+_COLLAPSE_OPS = frozenset({("::", -1), ("[", 0)})
+
+
+def _const_index(node: ast.expr) -> int | None:
+    """The integer of a constant subscript; ``None`` for slices and expressions."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _const_index(node.operand)
+        return None if inner is None else -inner
+    return None
+
+
+def _peel_splits(node: ast.expr) -> tuple[ast.expr, set[tuple[str, int]]]:
+    """Unwind a chain of ``X.split(SEP)[IDX]`` into its root and its ``(sep, idx)`` ops.
+
+    Reads ``args[0]`` only, so the owner's ``split("[", 1)[0]`` maxsplit form
+    peels the same as a bare ``split("[")[0]``.
+    """
+    ops: set[tuple[str, int]] = set()
+    cur = node
+    while (
+        isinstance(cur, ast.Subscript)
+        and isinstance(cur.value, ast.Call)
+        and isinstance(cur.value.func, ast.Attribute)
+        and cur.value.func.attr == "split"
+        and cur.value.args
+        and isinstance(cur.value.args[0], ast.Constant)
+        and isinstance(cur.value.args[0].value, str)
+    ):
+        idx = _const_index(cur.slice)
+        if idx is not None:
+            ops.add((cur.value.args[0].value, idx))
+        cur = cur.value.func.value
+    return cur, ops
+
+
+def _binding_scopes(tree: ast.Module) -> Iterator[list[ast.stmt]]:
+    """Statement lists that share local name bindings: module level, then each function."""
+    yield [s for s in tree.body if not isinstance(s, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            yield node.body
+
+
+def _inline_collapse_lines(source: str, filename: str) -> list[int]:
+    """Lines re-implementing ``scenario_name`` inline: both collapse ops on one root.
+
+    An AST walk rather than a regex, because the collapse has four shapes and a
+    regex can only pin one split ORDER: chained ``::``-then-``[``, chained
+    ``[``-then-``::``, and either of those spread across two statements via an
+    intermediate binding (``func_with_param = nodeid.split("::")[-1]`` on one
+    line, ``.split("[")[0]`` on the next). Ops are resolved through a one-level
+    name binding so the two-statement form reduces to the chained one.
+    """
+    tree = ast.parse(source, filename)
+    hits: set[int] = set()
+    for body in _binding_scopes(tree):
+        bindings: dict[str, set[tuple[str, int]]] = {}
+
+        def resolve(expr: ast.expr, _bindings: dict[str, set[tuple[str, int]]] = bindings) -> set[tuple[str, int]]:
+            root, ops = _peel_splits(expr)
+            if isinstance(root, ast.Name) and root.id in _bindings:
+                ops = ops | _bindings[root.id]
+            return ops
+
+        nodes = [n for stmt in body for n in ast.walk(stmt)]
+        for node in sorted(nodes, key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                ops = resolve(node.value)
+                if ops:
+                    bindings[node.targets[0].id] = ops
+            if isinstance(node, ast.Subscript) and _COLLAPSE_OPS <= resolve(node):
+                hits.add(node.lineno)
+    return sorted(hits)
+
 
 #: The one file whose emitted xfail reasons the two AST guards below grade.
 _CONFTEST = Path(__file__).resolve().parents[1] / "bdd" / "conftest.py"
@@ -445,11 +528,6 @@ class TestSharedTaxonomy:
     honest pin. The shared implementation's own behaviour is exercised below.
     """
 
-    #: The idiom both scripts used to inline: ``nid.split("::")[-1].split("[")...``.
-    #: Narrow on purpose — enumerate_bdd_issues legitimately does
-    #: ``nid.split("[")[-1]`` elsewhere to pull the transport out of a param id.
-    _INLINE_COLLAPSE = re.compile(r"""split\(\s*["']::["']\s*\)\[-1\]\s*\.\s*split\(\s*["']\[["']""")
-
     def test_check_dormant_uses_the_shared_collapse(self):
         assert cds.scenario_name is xt.scenario_name
 
@@ -457,14 +535,57 @@ class TestSharedTaxonomy:
         mod = _load_script("enumerate_bdd_issues.py")
         assert mod.scenario_name is xt.scenario_name
 
-    @pytest.mark.parametrize("script", ["check_dormant_scenarios.py", "enumerate_bdd_issues.py"])
-    def test_no_script_reimplements_the_collapse_inline(self, script):
-        path = _SCRIPTS_DIR / script
-        hits = self._INLINE_COLLAPSE.findall(path.read_text(encoding="utf-8"))
-        assert hits == [], (
-            f"scripts/{script} re-implements the nodeid->scenario collapse inline; "
-            f"call tests.bdd.xfail_taxonomy.scenario_name so the two scripts cannot drift."
+    def test_no_script_reimplements_the_collapse_inline(self):
+        """Graded over the ROLE — every ``scripts/*.py`` — not a hand-kept list.
+
+        A list of the scripts known to inline the collapse only ever names the
+        sites someone already found: two further copies (graduate_pending,
+        detect_misrouted_transport) sat green because they were not on it. The
+        glob makes a new script's inline copy red on arrival.
+        """
+        offenders = {
+            path.name: lines
+            for path in sorted(_SCRIPTS_DIR.glob("*.py"))
+            if (lines := _inline_collapse_lines(path.read_text(encoding="utf-8"), str(path)))
+        }
+        assert offenders == {}, (
+            "these scripts re-implement the nodeid->scenario collapse inline instead of calling "
+            "tests.bdd.xfail_taxonomy.scenario_name, so a fix to the collapse (a new pytest id shape) "
+            f"lands in the owner while they keep a divergent scenario name. {{file: [lines]}} = {offenders}"
         )
+
+    @pytest.mark.parametrize(
+        ("source", "is_collapse"),
+        [
+            ('def f(n):\n    return n.split("::")[-1].split("[")[0]\n', True),
+            ('def f(n):\n    return n.split("::")[-1].split("[", 1)[0]\n', True),
+            ('def f(n):\n    return n.split("[")[0].split("::")[-1]\n', True),
+            ('def f(n):\n    a = n.split("::")[-1]\n    return a.split("[")[0]\n', True),
+            ('def f(n):\n    a = n.split("[")[0]\n    return a.split("::")[-1]\n', True),
+            ('def f(n):\n    return n.split("[")[-1].rstrip("]")\n', False),
+            ('def f(n):\n    a = n.split("::")[-1]\n    return a.split("[")[1].rstrip("]")\n', False),
+            ('def f(n):\n    return n.split("::")[-1]\n', False),
+        ],
+        ids=[
+            "chained-sep-first",
+            "chained-with-maxsplit",
+            "chained-bracket-first",
+            "two-statement-sep-first",
+            "two-statement-bracket-first",
+            "param-pull-negative-index",
+            "param-pull-after-sep-split",
+            "module-strip-only",
+        ],
+    )
+    def test_matcher_sees_every_collapse_shape_and_no_param_pull(self, source, is_collapse):
+        """An empty offender list is only meaningful if the matcher models every shape.
+
+        The regex this replaced returned clean on rows 3-5 — it pinned ONE split
+        order — which is precisely why two inline copies went unseen. Rows 6-7 are
+        the param EXTRACTION that lives a line away from the collapse in the same
+        files; flagging those would make the guard unusable.
+        """
+        assert bool(_inline_collapse_lines(source, "<synthetic>")) is is_collapse
 
     @pytest.mark.parametrize(
         ("nodeid", "expected"),
@@ -590,73 +711,227 @@ class TestMapPaths:
         assert not cds.is_bdd_relevant("src/core/tools/media_buy_update.py")
 
 
-class TestRunGuard:
-    """The clean no-DB run is exit 0 (skips + xfails); any nonzero exit means the
-    run broke (collection/import error, failed test), so the checker must surface
-    it and fail -- never report a false 'no dormant scenarios'."""
+class TestMainExitBoundary:
+    """Every branch of ``main()`` that prints an outcome and returns a code, pinned
+    as a ROLE rather than one path per review round.
 
-    def _run_main(self, monkeypatch, returncode, stdout="", stderr="", argv=None):
+    Two earlier rounds each added exactly one exit oracle -- the broken pytest run,
+    then the merge-base bail -- which left the other branches unpinned: the
+    no-usable-base bail, the no-BDD-relevant-changes all-clear, and the ``--strict``
+    half of the dormant split could each be replaced with a bare ``return 0`` and
+    the suite stayed green. That is the headline contract ("exit 0 by default,
+    ``--strict`` flips to 1 on findings") going silently no-op with nothing red.
+
+    The cannot-assess bails each assert their own message AND that the all-clear
+    phrasings ("nothing to check" / "no dormant scenarios") are ABSENT -- the
+    load-bearing half, since a silent exit 0 reads as "checked, all clear", which
+    is the exact false green this tool exists to kill.
+
+    ``test_every_main_exit_is_pinned`` closes the loop: a new branch in ``main()``
+    is red until it is added to ``_CASES``, so the next exit path is covered by
+    construction rather than by memory.
+    """
+
+    _BDD_MODULE = "tests/bdd/test_uc003_update_media_buy.py"
+    _NON_BDD = "src/core/tools/media_buy_update.py"
+    _ALL_CLEAR = ("nothing to check", "no dormant scenarios")
+
+    class _Case(NamedTuple):
+        argv: list[str]
+        returncode: int
+        stdout: str
+        expected_rc: int
+        #: Substring that BOTH locates the branch in the script source and is
+        #: asserted on stdout -- one string, so the two cannot drift apart.
+        marker: str
+        also_prints: tuple[str, ...] = ()
+        must_not_print: tuple[str, ...] = ()
+
+    @staticmethod
+    def _git_stub(*, rev_parse="0123456789abcdef", merge_base="0123456789abcdef", diff="", status=""):
+        """A fake ``cds._git`` keyed on the git subcommand."""
+        responses = {"rev-parse": rev_parse, "merge-base": merge_base, "diff": diff, "status": status}
+        return lambda *args: responses.get(args[0], "")
+
+    #: One row per outcome-returning branch of ``main()``.
+    _CASES: dict[str, _Case] = {
+        "no-usable-base-ref": _Case(
+            argv=[],
+            returncode=0,
+            stdout="",
+            expected_rc=0,
+            marker="no usable base ref",
+            must_not_print=_ALL_CLEAR,
+        ),
+        "no-merge-base": _Case(
+            argv=[],
+            returncode=0,
+            stdout="",
+            expected_rc=0,
+            marker="no merge-base with",
+            also_prints=("upstream/main",),
+            must_not_print=_ALL_CLEAR,
+        ),
+        "no-bdd-relevant-changes": _Case(
+            argv=[],
+            returncode=0,
+            stdout="",
+            expected_rc=0,
+            marker="no BDD-relevant changes",
+            must_not_print=("no dormant scenarios",),
+        ),
+        "paths-map-to-no-module": _Case(
+            argv=["--paths", _NON_BDD],
+            returncode=0,
+            stdout="",
+            expected_rc=0,
+            marker="map to no BDD test module",
+            must_not_print=("no dormant scenarios",),
+        ),
+        "broken-run-exit-1": _Case(
+            argv=["--paths", _BDD_MODULE],
+            returncode=1,
+            stdout="",
+            expected_rc=1,
+            marker="did not run cleanly",
+            also_prints=("(exit 1)",),
+            must_not_print=("no dormant scenarios",),
+        ),
+        "broken-run-exit-2": _Case(
+            argv=["--paths", _BDD_MODULE],
+            returncode=2,
+            stdout="",
+            expected_rc=1,
+            marker="did not run cleanly",
+            also_prints=("(exit 2)",),
+            must_not_print=("no dormant scenarios",),
+        ),
+        "clean-all-clear": _Case(
+            argv=["--paths", _BDD_MODULE],
+            returncode=0,
+            stdout="",
+            expected_rc=0,
+            marker="no dormant scenarios in the touched area",
+            must_not_print=("DORMANT scenario",),
+        ),
+        "clean-all-clear-under-strict": _Case(
+            # --strict must NOT flip a clean run; it only grades findings.
+            argv=["--strict", "--paths", _BDD_MODULE],
+            returncode=0,
+            stdout="",
+            expected_rc=0,
+            marker="no dormant scenarios in the touched area",
+            must_not_print=("DORMANT scenario",),
+        ),
+        "dormant-informational": _Case(
+            argv=["--paths", _BDD_MODULE],
+            returncode=0,
+            stdout=SAMPLE_OUTPUT,
+            expected_rc=0,
+            marker="Use --strict to make it fail.",
+            also_prints=("DORMANT scenario",),
+        ),
+        "dormant-strict": _Case(
+            argv=["--strict", "--paths", _BDD_MODULE],
+            returncode=0,
+            stdout=SAMPLE_OUTPUT,
+            expected_rc=1,
+            marker="Use --strict to make it fail.",
+            also_prints=("DORMANT scenario",),
+        ),
+    }
+
+    def _git_for(self, case_id: str):
+        """The ``_git`` stub a case needs; ``None`` when the case never shells out."""
+        return {
+            "no-usable-base-ref": self._git_stub(rev_parse=""),
+            "no-merge-base": self._git_stub(merge_base=""),
+            "no-bdd-relevant-changes": self._git_stub(diff=self._NON_BDD),
+        }.get(case_id)
+
+    def _run_main(self, monkeypatch, case_id: str, case: _Case) -> int:
         monkeypatch.setattr(
             cds,
             "run_without_db",
-            lambda modules: subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr),
+            lambda modules: subprocess.CompletedProcess(
+                args=[], returncode=case.returncode, stdout=case.stdout, stderr=""
+            ),
         )
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            argv or ["check_dormant_scenarios.py", "--paths", "tests/bdd/test_uc003_update_media_buy.py"],
-        )
+        git = self._git_for(case_id)
+        if git is not None:
+            monkeypatch.setattr(cds, "_git", git)
+        monkeypatch.setattr(sys, "argv", ["check_dormant_scenarios.py", *case.argv])
         return cds.main()
 
-    def test_broken_run_surfaced_not_reported_clean(self, monkeypatch, capsys):
-        rc = self._run_main(monkeypatch, returncode=1, stderr="ImportError: cannot import name 'ByGeoItem'")
+    @pytest.mark.parametrize("case_id", list(_CASES), ids=list(_CASES))
+    def test_exit_boundary(self, case_id, monkeypatch, capsys):
+        case = self._CASES[case_id]
+        rc = self._run_main(monkeypatch, case_id, case)
         out = capsys.readouterr().out
-        assert rc == 1, "a broken pytest run must fail the checker, not exit 0"
-        assert "did not run cleanly" in out
-        assert "ByGeoItem" in out
-        assert "no dormant scenarios" not in out
+        assert rc == case.expected_rc, f"{case_id}: expected exit {case.expected_rc}, got {rc}. stdout:\n{out}"
+        for substr in (case.marker, *case.also_prints):
+            assert substr in out, f"{case_id}: expected {substr!r} in stdout:\n{out}"
+        for substr in case.must_not_print:
+            assert substr not in out, (
+                f"{case_id}: {substr!r} must NOT print -- a bail that reads as a checked all-clear "
+                f"is the false green this checker exists to kill. stdout:\n{out}"
+            )
 
-    def test_collection_error_exit_2_also_surfaced(self, monkeypatch, capsys):
-        rc = self._run_main(monkeypatch, returncode=2, stderr="ERROR collecting test_x.py")
-        out = capsys.readouterr().out
-        assert rc == 1
-        assert "did not run cleanly (exit 2)" in out
-        assert "no dormant scenarios" not in out
+    def test_every_main_exit_is_pinned(self):
+        """The table covers every ``return`` in ``main()`` -- no branch pinned by memory.
 
-    def test_clean_run_still_classifies_dormant(self, monkeypatch, capsys):
-        rc = self._run_main(monkeypatch, returncode=0, stdout=SAMPLE_OUTPUT)
-        out = capsys.readouterr().out
-        assert "DORMANT scenario" in out
-        assert rc == 0  # informational (non-strict) reports but does not fail
-
-    def test_paths_mapping_to_nothing_says_so(self, monkeypatch, capsys):
-        """Parity with the git-diff path: a silent exit 0 reads as 'checked, all clear'."""
-        rc = self._run_main(
-            monkeypatch,
-            returncode=0,
-            argv=["check_dormant_scenarios.py", "--paths", "src/core/tools/media_buy_update.py"],
+        Resolves each case's marker to the ``return`` its branch falls through to,
+        then compares that set against main()'s actual ``Return`` nodes. Adding a
+        branch to ``main()`` without a ``_CASES`` row reddens here, which is what
+        makes the next exit path covered by construction. Line numbers are derived,
+        never hardcoded, so ordinary edits to the script do not churn this test.
+        """
+        source = (_SCRIPTS_DIR / "check_dormant_scenarios.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        main_fn = next(
+            n for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef) and n.name == "main"
         )
-        out = capsys.readouterr().out
-        assert rc == 0
-        assert "nothing to check" in out
+        returns = {n.lineno for n in ast.walk(main_fn) if isinstance(n, ast.Return)}
+
+        # Scan only main()'s own line range: "no merge-base with" also appears in
+        # changed_paths' docstring above it, which would resolve to the wrong return.
+        body = list(enumerate(source.splitlines(), start=1))[main_fn.lineno - 1 : main_fn.end_lineno]
+
+        pinned: dict[int, list[str]] = {}
+        for case_id, case in self._CASES.items():
+            hit = next((i for i, line in body if case.marker in line), None)
+            assert hit is not None, f"{case_id}: marker {case.marker!r} no longer appears inside main()"
+            later = sorted(r for r in returns if r >= hit)
+            assert later, f"{case_id}: marker at line {hit} has no return after it"
+            pinned.setdefault(later[0], []).append(case_id)
+
+        assert set(pinned) == returns, (
+            "main() has outcome-returning branches that no _CASES row pins (or a row now resolves "
+            f"outside main()). unpinned return lines: {sorted(returns - set(pinned))}; "
+            f"pinned: {dict(sorted(pinned.items()))}"
+        )
 
 
-class TestMergeBaseGuard:
-    """A ``git merge-base`` that fails must bail loudly, never diff ``"..HEAD"``.
+class TestChangedPathsSignal:
+    """``[]`` is indistinguishable from "nothing changed" -- main's all-clear branch
+    -- so the no-merge-base case needs its own signal.
 
     ``_git`` runs with ``check=False``, so on a shallow clone (or against an
-    unrelated ref) ``merge-base`` returns ""; the interpolated range collapses
-    to ``"..HEAD"``, which git resolves to HEAD..HEAD -- exit 0, empty diff. The
-    committed half of the change set silently vanishes and the checker prints
-    its all-clear on a branch that DID edit BDD files, the exact false green
-    this tool exists to kill.
+    unrelated ref) ``merge-base`` returns ""; the interpolated range collapses to
+    ``"..HEAD"``, which git resolves to HEAD..HEAD -- exit 0, empty diff. The
+    committed half of the change set silently vanishes and the checker prints its
+    all-clear on a branch that DID edit BDD files.
 
-    Deletion oracle: drop the ``if not merge_base`` guard in ``changed_paths``
-    and both tests redden -- the "..HEAD" diff is issued and the bail message is
-    replaced by the "nothing to check" all-clear.
+    Deletion oracle: drop the ``if not merge_base`` guard in ``changed_paths`` and
+    both of these redden alongside the ``no-merge-base`` exit case above.
     """
 
-    def test_bails_instead_of_diffing_head_against_head(self, monkeypatch, capsys):
+    def test_changed_paths_signals_none_rather_than_an_empty_diff(self, monkeypatch):
+        monkeypatch.setattr(cds, "_git", lambda *args: "")
+        assert cds.changed_paths("upstream/main") is None
+
+    def test_no_diff_range_is_issued_without_a_merge_base(self, monkeypatch, capsys):
+        """Beyond the exit code: the bogus ``"..HEAD"`` range must never reach git."""
         calls: list[tuple[str, ...]] = []
 
         def fake_git(*args: str) -> str:
@@ -666,18 +941,7 @@ class TestMergeBaseGuard:
 
         monkeypatch.setattr(cds, "_git", fake_git)
         monkeypatch.setattr(sys, "argv", ["check_dormant_scenarios.py"])
-        rc = cds.main()
-
-        out = capsys.readouterr().out
-        assert rc == 0
-        assert "no merge-base with upstream/main" in out
-        assert "nothing to check" not in out, "a bail must not read as a checked all-clear"
+        assert cds.main() == 0
         assert not any("..HEAD" in arg for call in calls for arg in call), (
             f"a diff range was issued with an empty merge-base: {calls}"
         )
-
-    def test_changed_paths_signals_none_rather_than_an_empty_diff(self, monkeypatch):
-        """``[]`` is indistinguishable from "nothing changed" -- main's all-clear
-        branch -- so the no-merge-base case needs its own signal."""
-        monkeypatch.setattr(cds, "_git", lambda *args: "")
-        assert cds.changed_paths("upstream/main") is None
