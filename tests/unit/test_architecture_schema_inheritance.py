@@ -274,14 +274,18 @@ class TestSchemaInheritance:
             ("CreateMediaBuySuccess", "confirmed_at"),
             ("CreateMediaBuySuccess", "revision"),
             ("CreateMediaBuySuccess", "status"),
-            # Same rationale as the create twin: UpdateMediaBuyResponse1 declares
-            # status/revision required with no default; the subclass supplies the
-            # spec-correct defaults for a synchronous applied update.
+            # Same rationale as the create twin: the adcp 6.6 parent
+            # (UpdateMediaBuyResponse1) declares status/revision required with no default,
+            # so these can never migrate to plain inheritance. See the UpdateMediaBuySuccess
+            # field declarations in src/core/schemas/_base.py for the full rationale. Kept as
+            # a pointer, not a restatement, so the argument lives in exactly one place.
             ("UpdateMediaBuySuccess", "revision"),
             ("UpdateMediaBuySuccess", "status"),
-            # Pattern #4: local list[AffectedPackage] carries changes_applied /
-            # buyer_package_ref (exclude=True, off the wire); the parent types it
-            # Sequence[Package].
+            # Pattern #4: the adcp 6.6 parent (UpdateMediaBuyResponse1) types
+            # affected_packages Sequence[Package], so the local list[AffectedPackage] retype
+            # can never migrate to plain inheritance. See the affected_packages field
+            # declaration in src/core/schemas/_base.py for the full rationale. Kept as a
+            # pointer, not a restatement, so the argument lives in exactly one place.
             ("UpdateMediaBuySuccess", "affected_packages"),
             # Pattern #4 nested serialization: the field is retyped to a local element
             # class, so it can never migrate to plain inheritance. See the
@@ -289,11 +293,17 @@ class TestSchemaInheritance:
             # src/core/schemas/account.py for the full rationale. Kept as a pointer, not a
             # restatement, so the argument lives in exactly one place.
             ("SyncAccountsResponse", "accounts"),
-            # Pattern #4: local SyncCreativeResult adds assigned_to/assignment_errors/
-            # changes/warnings; required-no-default per pinned 3.1 SyncCreativesSuccess.
+            # Pattern #4 nested serialization: the field is retyped to a local element
+            # class (SyncCreativeResult), so it can never migrate to plain inheritance. See
+            # the creatives field declaration in src/core/schemas/creative.py for the full
+            # rationale. Kept as a pointer, not a restatement, so the argument lives in
+            # exactly one place.
             ("SyncCreativesResponse", "creatives"),
-            # Local FrequencyCap extends the library type with `scope`
-            # (media_buy vs package level).
+            # Pattern #4: the field is retyped to the local FrequencyCap subclass, so it can
+            # never migrate to plain inheritance. See the FrequencyCap class and the
+            # Targeting.frequency_cap field declaration in src/core/schemas/_base.py for the
+            # full rationale. Kept as a pointer, not a restatement, so the argument lives in
+            # exactly one place.
             ("Targeting", "frequency_cap"),
             # The geo_*_exclude fields are deliberately redeclared to unify the include
             # and exclude element types. See the Targeting.geo_*_exclude field
