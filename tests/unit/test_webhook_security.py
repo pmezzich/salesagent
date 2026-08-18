@@ -15,7 +15,6 @@ from src.core.webhook_validator import (
     WebhookURLValidator,
     validate_webhook_task_type,
 )
-from tests.helpers.webhook_hmac import assert_hmac_over_transmitted_bytes
 
 
 class TestValidateWebhookTaskType:
@@ -179,27 +178,14 @@ class TestWebhookURLValidator:
 
 
 class TestWebhookAuthenticator:
-    """The byte-equality signing contract and ``WebhookAuthenticator.verify_signature``.
+    """The receiver-side ``WebhookAuthenticator.verify_signature`` reference.
 
-    Signing now lives in the SDK (``sign_legacy_webhook``); the salesagent code
-    under test here is the receiver-side ``verify_signature`` reference. The one
-    signer test that stays grades the #1441 byte-equality CONTRACT through the
-    shared assertion — generic HMAC properties of the SDK are the SDK's to test.
+    Signing itself lives in the SDK (``sign_legacy_webhook``), which is the
+    SDK's to test. The signer's spec header format is graded with a production
+    sender in the path by ``test_delivery.py::test_hmac_sha256_signature_headers``,
+    and the SDK-to-local body equality by
+    ``test_webhook_body.py::test_compact_body_matches_sign_legacy_webhook``.
     """
-
-    def test_sign_legacy_webhook_headers_and_byte_equality(self):
-        """The canonical signer emits spec headers and signs the exact bytes it returns.
-
-        Byte-equality is the AdCP legacy-HMAC contract: the signature covers
-        ``{timestamp}.{body_bytes}`` where ``body_bytes`` is what senders MUST
-        transmit verbatim (``content=``/``data=``, never ``json=``).
-        """
-        payload = {"event": "test", "data": "value"}
-        secret = "test_secret_key"
-
-        headers, body_bytes = sign_legacy_webhook(secret, payload)
-
-        assert_hmac_over_transmitted_bytes(secret, body_bytes, headers, cross_check_receivers=False)
 
     def test_verify_signature_valid(self):
         """Should verify valid signature."""

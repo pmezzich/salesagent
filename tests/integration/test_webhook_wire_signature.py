@@ -25,6 +25,7 @@ import pytest
 
 from tests.e2e._webhook_capture import WebhookCaptureHandler
 from tests.helpers.webhook_hmac import assert_hmac_over_transmitted_bytes
+from tests.helpers.webhook_mocks import make_webhook_config, serve_webhook_configs
 
 pytestmark = [pytest.mark.integration]
 
@@ -167,14 +168,18 @@ def test_delivery_service_sender_signature_verifies_on_received_bytes(capture_se
 
     from src.services.webhook_delivery_service import WebhookDeliveryService
 
-    config = MagicMock()
-    config.url = capture_server
-    config.webhook_secret = SECRET  # the signer reads webhook_secret, not authentication_token
-    config.authentication_type = None
-    config.auth_blocked_at = None
+    # Through the shared builder so the config shape has one editing point: it
+    # also pins authentication_token/validation_token to None, which a
+    # hand-rolled MagicMock leaves truthy and would route this sender down a
+    # branch the test does not mean to exercise.
+    config = make_webhook_config(
+        url=capture_server,
+        webhook_secret=SECRET,  # the signer reads webhook_secret, not authentication_token
+        auth_blocked_at=None,
+    )
 
     session = MagicMock()
-    session.__enter__.return_value.scalars.return_value.all.return_value = [config]
+    serve_webhook_configs(session.__enter__.return_value, config)
     session.__exit__.return_value = False
 
     service = WebhookDeliveryService()

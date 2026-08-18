@@ -324,13 +324,8 @@ def test_deliver_rejects_metadata_url_without_post(webhook_service, mock_db_sess
     monkeypatch.delenv("ADCP_TESTING", raising=False)
     start_time = datetime.now(UTC)
 
-    mock_config = MagicMock()
-    mock_config.url = "http://169.254.169.254/latest/meta-data/"
-    mock_config.authentication_type = None
-    mock_config.authentication_token = None
-    mock_config.validation_token = None
-    mock_config.webhook_secret = None
-    mock_db_session.scalars.return_value.all.return_value = [mock_config]
+    mock_config = make_webhook_config(url="http://169.254.169.254/latest/meta-data/")
+    serve_webhook_configs(mock_db_session, mock_config)
 
     with patch("src.services.webhook_delivery_service.httpx.Client") as mock_client:
         result = webhook_service.send_delivery_webhook(
@@ -354,13 +349,8 @@ def test_deliver_disables_httpx_redirects(webhook_service, mock_db_session):
     """httpx Client must disable redirects to prevent open-redirect SSRF."""
     start_time = datetime.now(UTC)
 
-    mock_config = MagicMock()
-    mock_config.url = "https://example.com/webhook"
-    mock_config.authentication_type = None
-    mock_config.authentication_token = None
-    mock_config.validation_token = None
-    mock_config.webhook_secret = None
-    mock_db_session.scalars.return_value.all.return_value = [mock_config]
+    mock_config = make_webhook_config()
+    serve_webhook_configs(mock_db_session, mock_config)
 
     with (
         patch(
@@ -369,9 +359,7 @@ def test_deliver_disables_httpx_redirects(webhook_service, mock_db_session):
         ),
         patch("src.services.webhook_delivery_service.httpx.Client") as mock_client,
     ):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_client.return_value.__enter__.return_value.post.return_value = mock_response
+        mock_httpx_post(mock_client)
 
         webhook_service.send_delivery_webhook(
             media_buy_id="buy_redir",

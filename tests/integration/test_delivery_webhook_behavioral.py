@@ -69,36 +69,6 @@ class TestWebhookDeliveryHappyPath:
 
 
 # ---------------------------------------------------------------------------
-# UC-004-ALT-WEBHOOK-PUSH-REPORTING-07
-# ---------------------------------------------------------------------------
-
-
-class TestWebhookHmacSha256Signing:
-    """Webhook payload signed with HMAC-SHA256.
-
-    Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-07
-    """
-
-    def test_sign_legacy_webhook_produces_hmac_headers(self):
-        """The canonical signer produces HMAC-SHA256 headers over the wire bytes.
-
-        Covers: UC-004-ALT-WEBHOOK-PUSH-REPORTING-07
-        """
-        from adcp import sign_legacy_webhook
-
-        from tests.helpers.webhook_hmac import assert_hmac_over_transmitted_bytes
-
-        payload = {"media_buy_id": "mb_001", "impressions": 5000}
-        secret = "test-signing-secret"
-
-        headers, body_bytes = sign_legacy_webhook(secret, payload)
-
-        # Byte-equality: the signature verifies over the returned wire bytes.
-        # No transport here, so the receiver cross-check is off.
-        assert_hmac_over_transmitted_bytes(secret, body_bytes, headers, cross_check_receivers=False)
-
-
-# ---------------------------------------------------------------------------
 # UC-004-ALT-WEBHOOK-PUSH-REPORTING-08
 # ---------------------------------------------------------------------------
 

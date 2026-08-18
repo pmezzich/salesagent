@@ -21,6 +21,7 @@ from pytest_bdd import given, parsers, then, when
 from tests.bdd.steps.generic._dispatch import dispatch_request
 from tests.bdd.steps.generic.then_error import _get_error_message
 from tests.bdd.steps.generic.then_payload import register_boundary_handler
+from tests.harness._mixins import raw_body_from_kwargs
 from tests.helpers.webhook_hmac import assert_hmac_over_transmitted_bytes, assert_signature_headers_present
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -40,22 +41,12 @@ def _parse_json_list(text: str) -> list[str]:
     return json.loads(text)
 
 
-def _raw_body_from_kwargs(kwargs: dict[str, Any]) -> Any:
-    """The pre-serialized body a sender POSTed, whichever kwarg carried it.
-
-    ``requests`` spells it ``data=`` and ``httpx`` spells it ``content=``; both
-    senders pass transmitted bytes so the signed bytes are the transmitted bytes.
-    One accessor so a third spelling is taught in one place rather than two.
-    """
-    return kwargs.get("data") or kwargs.get("content")
-
-
 def _parse_call_payload(call: Any) -> dict[str, Any]:
     """Parse one mocked POST call's payload from its wire bytes (or legacy json=)."""
     kwargs = call[1]
     payload = kwargs.get("json")
     if payload is None:
-        raw = _raw_body_from_kwargs(kwargs)
+        raw = raw_body_from_kwargs(kwargs)
         if raw is None:
             return {}
         payload = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
@@ -63,17 +54,15 @@ def _parse_call_payload(call: Any) -> dict[str, Any]:
 
 
 def _get_last_webhook_body_bytes(ctx: dict) -> bytes:
-    """Extract the RAW body bytes from the most recent webhook POST call.
+    """The RAW body bytes of the most recent webhook POST, read via the env seam.
 
     Senders POST pre-serialized bytes (``data=``/``content=``) so the signed
     bytes are the transmitted bytes — these are what HMAC assertions must use.
+    Read through ``env.last_webhook_wire()`` rather than the POST mock so the
+    source can vary by transport (see ``WebhookWireMixin``).
     """
-    mock_post = ctx["env"].mock["post"]
-    assert mock_post.called, "No webhook POST was made"
-    call_kwargs = mock_post.call_args_list[-1][1]
-    raw = _raw_body_from_kwargs(call_kwargs)
-    assert raw is not None, f"Webhook POST had no body bytes: {call_kwargs}"
-    return raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+    body, _ = ctx["env"].last_webhook_wire()
+    return body
 
 
 def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
@@ -92,11 +81,14 @@ def _get_last_webhook_payload(ctx: dict) -> dict[str, Any]:
 
 
 def _get_last_webhook_headers(ctx: dict) -> dict[str, str]:
-    """Extract headers from the most recent webhook POST call."""
-    mock_post = ctx["env"].mock["post"]
-    assert mock_post.called, "No webhook POST was made"
-    call_kwargs = mock_post.call_args_list[-1][1]
-    return call_kwargs.get("headers", {})
+    """The headers of the most recent webhook POST, read via the env seam.
+
+    Same seam as the body (``env.last_webhook_wire()``): the signature and the
+    bytes it covers must come from ONE read of ONE request, or a step could
+    grade a header against a different POST's body.
+    """
+    _, headers = ctx["env"].last_webhook_wire()
+    return headers
 
 
 def _ci_header(ctx: dict, header: str) -> str:
