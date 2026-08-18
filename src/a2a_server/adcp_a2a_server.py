@@ -1710,7 +1710,7 @@ class AdCPRequestHandler(RequestHandler):
         #
         # Emission shape for a schema-invalid item: this skill boundary refuses the
         # whole request (VALIDATION_ERROR) at construction. The nearest storyboard
-        # scenario, @T-UC-006-ext-c (BR-UC-006-sync-creatives.feature:177-183), sets a
+        # scenario, @T-UC-006-ext-c (BR-UC-006-sync-creatives.feature), sets a
         # single schema-invalid creative (`assets: "not-a-valid-assets-structure"`)
         # and expects a per-item `action "failed"` / CREATIVE_VALIDATION_FAILED — but
         # it is a strict xfail (tests/bdd/conftest.py `_UC006_SPECGAP_XFAIL_TAGS`:
