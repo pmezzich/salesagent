@@ -178,7 +178,7 @@ class TestResolveIdentity:
         collapsed @T-UC-002-invalid-token-no-disclosure BDD scenario, swept across
         a2a/mcp/rest (+e2e_rest) and asserting through
         ``assert_wire_error(..., require_real_wire=True)`` on the A2A leg so a
-        rebuilt envelope cannot stand in for the wire. This test stays because it
+        synthesized envelope cannot stand in for the wire. This test stays because it
         is the only one that can assert the compensating log line cheaply."""
         import logging
 

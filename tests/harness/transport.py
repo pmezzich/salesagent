@@ -16,7 +16,7 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import BaseModel
 
@@ -86,6 +86,58 @@ TRANSPORT_PROTOCOL: dict[Transport, str] = {
 }
 
 
+class InvalidAuthHint(TypedDict):
+    """Shape of the transport-blind ``_invalid_auth`` hint the BDD step forwards.
+
+    Names the two keys ONCE, so the producer (``uc002_create_media_buy``'s
+    ``_dispatch_full_create``) and both REST consumers (``_run_rest_request`` in
+    ``_base``, ``RestE2EDispatcher`` in ``dispatchers``) are bound to one
+    declaration instead of re-spelling the string keys three times. ``tenant``
+    carries the bare host-routed tenant id the whole non-disclosure contract
+    turns on: a typo or a dropped key would otherwise be caught by nothing until
+    the leg silently stopped reaching the redacted raise.
+
+    Lives here, in the leaf transport module, rather than in ``_base``: both
+    consumers already import down from ``transport``, and ``transport`` imports
+    nothing from ``tests.harness``, so neither consumer has to reach up into the
+    env layer to name the contract.
+    """
+
+    token: str
+    tenant: str
+
+
+def _invalid_auth_headers(hint: InvalidAuthHint) -> dict[str, str]:
+    """Realize the ``_invalid_auth`` hint as REST auth headers — one recipe, both legs.
+
+    The in-process leg (``_run_rest_request``) and the e2e leg
+    (``RestE2EDispatcher``) send the identical pair. Hand-copying it per leg is
+    how the two silently diverge, and a divergence here does not fail loudly —
+    it false-floors the grade, because a leg that stops reaching the redacted
+    raise still reports no disclosure.
+    """
+    return {"x-adcp-auth": hint["token"], "x-adcp-tenant": hint["tenant"]}
+
+
+def _discard_invalid_auth_hint(kwargs: dict[str, Any]) -> None:
+    """Drop the transport-blind ``_invalid_auth`` hint on the A2A and MCP legs.
+
+    The BDD invalid-token scenario forwards the bad token uniformly as
+    ``_invalid_auth`` (``_dispatch_full_create``) so no step carries
+    transport-specific knowledge. A2A and MCP need no special realization: the
+    bad token already rides the dispatched identity's ``auth_token`` and the real
+    auth chain (header → token → DB lookup → ``ResolvedIdentity``) runs against
+    it, so both simply discard the hint. REST is the only transport that realizes
+    it specially — the in-process leg routes the bad token through the real
+    auth dep as headers (``_run_rest_request``) because its dep override would
+    otherwise inject a resolved identity and skip the raise, and the e2e leg
+    CONSUMES the hint into real headers (``RestE2EDispatcher``, not this discard)
+    because the identity's tenant dict carries only the derived ``pub-<uuid>``
+    subdomain, not the bare host-routed tenant id under test.
+    """
+    kwargs.pop("_invalid_auth", None)
+
+
 @dataclass(frozen=True)
 class E2EConfig:
     """Configuration for E2E transport dispatch.
@@ -128,14 +180,16 @@ class TransportResult:
             regression in the production boundary translator would not be
             caught here. Use REST/MCP/A2A for wire-shape regressions.
         wire_error_envelope_is_synthesized: ``True`` when the A2A dispatcher could
-            not find real wire bytes and REBUILT ``wire_error_envelope`` from the
-            reconstructed exception. That happens for an ``A2AError`` raised with
-            no ``data``: the buyer receives a bare protocol error carrying no
+            not find real wire bytes and SYNTHESIZED ``wire_error_envelope`` from
+            the reconstructed exception. That happens for an ``A2AError`` raised
+            with no ``data``: the buyer receives a bare protocol error carrying no
             AdCP envelope, yet ``wire_error_envelope`` is populated anyway, so a
             wire assertion can pass against an envelope nobody was ever sent.
             Always ``False`` on REST/MCP (they read real bytes) and on success.
             Pass ``require_real_wire=True`` to ``assert_wire_error`` to refuse
-            the rebuilt envelope.
+            the synthesized envelope. Distinct from ``synthesized_error_envelope``
+            above: this flag marks the A2A wire FALLBACK, while that field is the
+            IMPL-only envelope no wire was ever involved in.
     """
 
     payload: BaseModel | None = None
@@ -175,8 +229,8 @@ class TransportResult:
         must not hand-roll envelope parsing.
 
         Args:
-            require_real_wire: Refuse an envelope the A2A dispatcher REBUILT from
-                the reconstructed exception (see
+            require_real_wire: Refuse an envelope the A2A dispatcher SYNTHESIZED
+                from the reconstructed exception (see
                 ``wire_error_envelope_is_synthesized``). Use it when the point of
                 the test is what the buyer actually receives — a security or
                 disclosure contract — rather than the envelope shape alone.
@@ -201,9 +255,9 @@ class TransportResult:
             "succeeded or errored before reaching a transport."
         )
         assert not (require_real_wire and self.wire_error_envelope_is_synthesized), (
-            f"Expected {code} on the REAL wire, but the envelope was rebuilt from the reconstructed "
+            f"Expected {code} on the REAL wire, but the envelope was synthesized from the reconstructed "
             f"exception: the transport raised with no envelope attached, so the buyer received a bare "
-            f"protocol error carrying no AdCP envelope at all. Rebuilt envelope: {envelope}"
+            f"protocol error carrying no AdCP envelope at all. Synthesized envelope: {envelope}"
         )
         assert_envelope_shape(envelope, code, recovery=expected_recovery, message_substr=message_substr)
         if require_suggestion:

@@ -21,8 +21,12 @@ import copy
 import json
 from typing import TYPE_CHECKING, Any
 
-from tests.harness._base import InvalidAuthHint, _invalid_auth_headers
-from tests.harness.transport import Transport, TransportResult
+from tests.harness.transport import (
+    InvalidAuthHint,
+    Transport,
+    TransportResult,
+    _invalid_auth_headers,
+)
 
 if TYPE_CHECKING:
     from tests.harness._base import BaseTestEnv
@@ -71,7 +75,7 @@ def _wire_envelope_from_exception(exc: Exception) -> dict[str, Any] | None:
     return _envelope_from_adcp_error(exc)
 
 
-def _a2a_wire_envelope_was_synthesized(exc: Exception) -> bool:
+def _a2a_wire_envelope_is_synthesized(exc: Exception) -> bool:
     """True when ``_wire_envelope_from_exception`` had to FALL BACK for *exc*.
 
     The A2A boundary has two rejection shapes. A failed Task carries the
@@ -79,8 +83,8 @@ def _a2a_wire_envelope_was_synthesized(exc: Exception) -> bool:
     ``data`` — both are real wire bytes and both get stashed on the reconstructed
     exception as ``_wire_error_envelope``. But an ``A2AError`` raised with NO
     ``data`` reaches the buyer as a bare protocol error with no AdCP envelope at
-    all, and the fallback above quietly rebuilds one from the reconstructed
-    exception. That rebuild is indistinguishable from the real thing on
+    all, and the fallback above quietly synthesizes one from the reconstructed
+    exception. That synthesis is indistinguishable from the real thing on
     ``wire_error_envelope``, so a test can assert a wire contract the buyer never
     actually receives — a synthesized envelope masquerading as the wire.
 
@@ -149,7 +153,7 @@ class A2ADispatcher:
             return TransportResult(
                 error=exc,
                 wire_error_envelope=_wire_envelope_from_exception(exc),
-                wire_error_envelope_is_synthesized=_a2a_wire_envelope_was_synthesized(exc),
+                wire_error_envelope_is_synthesized=_a2a_wire_envelope_is_synthesized(exc),
             )
         # Real A2A wire: the artifact DataPart dict stashed by _run_a2a_handler
         # (declared on BaseTestEnv, reset per call_via — read directly so a

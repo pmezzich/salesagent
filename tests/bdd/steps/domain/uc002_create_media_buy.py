@@ -21,7 +21,7 @@ from pytest_bdd import given, parsers, then, when
 from tests.bdd.steps._harness_db import db_session as _db_session
 from tests.bdd.steps._outcome_helpers import _get_response_field
 from tests.factories.account import AccountFactory, AgentAccountAccessFactory
-from tests.harness._base import InvalidAuthHint
+from tests.harness.transport import InvalidAuthHint
 
 # ═══════════════════════════════════════════════════════════════════════
 # GIVEN steps — request setup and account state
@@ -828,7 +828,7 @@ def _dispatch_full_create(ctx: dict) -> None:
     # (harness _run_rest_request); A2A/MCP discard it because the bad token
     # already rides the dispatched identity's auth_token, and e2e REST sends
     # the identity's token as real headers anyway.
-    extra: dict = {}
+    extra: dict[str, Any] = {}
     if ctx.get("invalid_auth_token"):
         hint: InvalidAuthHint = {"token": ctx["invalid_auth_token"], "tenant": ctx["undisclosed_tenant_id"]}
         extra["_invalid_auth"] = hint

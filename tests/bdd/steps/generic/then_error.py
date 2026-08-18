@@ -294,7 +294,7 @@ def then_invalid_token_rejected_no_disclosure(ctx: dict) -> None:
     1. Positive AUTH-rejection pin — the request actually reached the redacted
        ``reject_invalid_token`` raise, per what the transport can carry:
          - a2a / rest build a real two-layer envelope -> assert ``AUTH_REQUIRED`` on
-           the REAL wire (``require_real_wire=True``), refusing a rebuilt envelope;
+           the REAL wire (``require_real_wire=True``), refusing a synthesized envelope;
          - mcp raises a bare ``ToolError`` with no envelope (#1704) -> assert the
            message equals ``INVALID_TOKEN_MESSAGE``.
     2. Non-disclosure — the host-routed tenant UUID appears nowhere the buyer sees,

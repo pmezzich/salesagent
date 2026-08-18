@@ -37,8 +37,8 @@ Feature: BR-UC-002 Account access scoping
   # is resolved from the request headers BEFORE the token is validated, so echoing
   # it back hands an unauthenticated caller an internal identifier (the tenant
   # UUID in a host-routed deploy). Non-disclosure is a contract about what the
-  # BUYER receives, so it is graded on the real wire, not on an envelope rebuilt
-  # in-process from a caught exception.
+  # BUYER receives, so it is graded on the real wire, not on an envelope
+  # synthesized in-process from a caught exception.
   #
   # ONE transport-agnostic scenario, swept across a2a/mcp/rest (+e2e_rest) by
   # pytest_generate_tests. Each transport reaches the same production
