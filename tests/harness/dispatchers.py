@@ -26,6 +26,35 @@ from tests.harness.transport import Transport, TransportResult
 if TYPE_CHECKING:
     from tests.harness._base import BaseTestEnv
 
+# HTTP verbs that carry no request body. Both client libraries the harness
+# drives — starlette's TestClient (in-process) and httpx.Client (e2e) — expose
+# get/delete/head/options WITHOUT a ``json`` kwarg, so passing one raises
+# TypeError before the request is ever sent.
+_BODYLESS_VERBS: frozenset[str] = frozenset({"get", "delete", "head", "options"})
+
+
+def rest_send(
+    client: Any,
+    method: str,
+    endpoint: str,
+    body: Any,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    """Issue one REST request, omitting ``json=`` for bodyless verbs.
+
+    The single home for "which verb carries a JSON body". Both REST dispatch
+    paths call it — ``BaseTestEnv._run_rest_request`` (in-process TestClient)
+    and ``RestE2EDispatcher`` (httpx against the live stack) — so the two can
+    never drift into disagreeing verb vocabularies. Envs select the verb by
+    setting ``REST_METHOD``; nobody else re-derives the body decision.
+    """
+    request_kwargs: dict[str, Any] = {}
+    if headers is not None:
+        request_kwargs["headers"] = headers
+    if method not in _BODYLESS_VERBS:
+        request_kwargs["json"] = body
+    return getattr(client, method)(endpoint, **request_kwargs)
+
 
 def _envelope_from_adcp_error(exc: Exception) -> dict[str, Any] | None:
     """Build a SYNTHESIZED envelope from an AdCPError instance.
@@ -271,15 +300,7 @@ class RestE2EDispatcher:
         endpoint = env.REST_ENDPOINT  # type: ignore[attr-defined]
 
         with httpx.Client(base_url=base_url, timeout=30) as client:
-            method = getattr(env, "REST_METHOD", "post")
-            if method in {"get", "delete", "head", "options"}:
-                # Bodyless verbs: httpx.Client.get/delete/head/options() take no
-                # ``json`` kwarg — passing one raises TypeError before the request
-                # is ever sent. Discovery reads (GET /api/v1/capabilities) carry no
-                # body. Honor the configured verb via getattr, just without json=.
-                response = getattr(client, method)(endpoint, headers=headers)
-            else:
-                response = getattr(client, method)(endpoint, json=body, headers=headers)
+            response = rest_send(client, getattr(env, "REST_METHOD", "post"), endpoint, body, headers=headers)
 
         envelope = {
             "transport": "e2e_rest",

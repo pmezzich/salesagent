@@ -114,9 +114,9 @@ def given_adapter_reports_no_pricing_models(ctx: dict) -> None:
 
     Grades the degrade contract's first partition on the wire: ``minItems: 1``
     makes ``[]`` unserializable, so "reports nothing" must surface as the field
-    being ABSENT, not empty — and the read must still succeed. Unrealizable
-    over e2e (the live stack's adapter surface is fixed production code); the
-    env method declares that via ``E2EUnsupportedSetup``.
+    being ABSENT, not empty — and the read must still succeed. The env seeds the
+    surface as a DB row the real adapter reads, so this partition dispatches
+    live on every transport, e2e_rest included.
     """
     env = ctx["env"]
     env.set_adapter_pricing_models(set())

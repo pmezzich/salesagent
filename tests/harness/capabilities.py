@@ -5,17 +5,20 @@ whole answer is derived from the tenant row, its publisher partnerships and the
 bound ad-server adapter. Those all live in the real database, so the env seeds a
 tenant/principal via factories (``ad_server="mock"`` → ``MockAdServer``) and lets
 production resolve the adapter for real. The one scenario-scoped override is
-``set_adapter_pricing_models`` (degrade partitions) — it pins the resolved
-adapter's declared pricing surface without touching adapter resolution itself.
+``set_adapter_pricing_models`` (degrade partitions) — it seeds the adapter's
+declared pricing surface as a DB row the real adapter reads, so the degrade
+partitions dispatch live on every transport, e2e included.
 
 Transport coverage: A2A (``get_adcp_capabilities`` skill), MCP
 (``get_adcp_capabilities`` tool), and REST. The REST route is
 ``GET /api/v1/capabilities`` — the only harness endpoint that is not a POST —
 so this env derives the verb from the request: the parameterless discovery call
 GETs, a request carrying a body POSTs it. ``build_rest_body`` records whether a
-body was built and the ``REST_METHOD`` property reads that flag, so the
-in-process and e2e dispatchers share one source of truth for the verb (precedent:
-the ``REST_METHOD``/``REST_ENDPOINT`` properties on ``media_buy_dual.py``).
+body was built and the ``REST_METHOD`` property reads that flag; the base
+``_run_rest_request`` and ``RestE2EDispatcher`` both honor it through the shared
+``rest_send`` helper, so the two dispatch paths share one source of truth for the
+verb (precedent: the ``REST_METHOD``/``REST_ENDPOINT`` properties on
+``media_buy_dual.py``).
 
 Usage::
 
@@ -28,12 +31,10 @@ Usage::
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
 
 from adcp.types import GetAdcpCapabilitiesResponse
 
 from tests.harness._base import IntegrationEnv
-from tests.harness._realize import e2e_unsupported, realize_e2e
 
 
 class CapabilitiesEnv(IntegrationEnv):
@@ -47,27 +48,29 @@ class CapabilitiesEnv(IntegrationEnv):
     # the in-process and e2e dispatchers, instead of a hand-synced constant.
     _rest_has_body: bool = False
 
-    @realize_e2e(
-        e2e_unsupported(
-            "the live stack resolves the tenant's real bound adapter, whose pricing "
-            "surface is fixed production code — a degenerate or off-enum adapter "
-            "cannot be injected over e2e"
-        )
-    )
     def set_adapter_pricing_models(self, models: set[str]) -> None:
         """Pin what the bound (mock) adapter reports as its pricing surface.
 
         The degrade partitions of POST-S10 need an adapter that reports nothing
-        or off-enum strings; production still resolves the REAL ``MockAdServer``
-        (``EXTERNAL_PATCHES`` stays empty), only its declared pricing surface is
-        overridden. The patch rides ``self._patchers`` so ``__exit__`` stops it
-        with the base teardown — no bleed into sibling scenarios.
-        """
-        from src.adapters.mock_ad_server import MockAdServer
+        or off-enum strings. Production still resolves the REAL ``MockAdServer``
+        (``EXTERNAL_PATCHES`` stays empty); the surface is seeded as
+        ``test_behavior["supported_pricing_models"]`` on the tenant's
+        ``AdapterConfig`` row, which ``MockAdServer.get_supported_pricing_models``
+        reads — the same DB-resolvable channel the adapter's fault injection
+        already uses.
 
-        patcher = patch.object(MockAdServer, "get_supported_pricing_models", return_value=set(models))
-        patcher.start()
-        self._patchers.append(patcher)
+        Deliberately NOT a ``realize_e2e`` two-branch method: the DB row is the
+        one mechanism both dispatch paths read, so there is no in-process/e2e
+        split to keep in sync and the degrade partitions dispatch live on every
+        transport. In e2e mode ``self._session`` is bound to the live server's
+        Postgres, so the row the server reads is the row this writes.
+
+        ``sorted()`` because the value round-trips through JSON, which has no
+        set type — an ordered list keeps the persisted row deterministic.
+        """
+        from tests.factories.core import set_adapter_test_behavior
+
+        set_adapter_test_behavior(self, self._tenant_id, supported_pricing_models=sorted(models))
 
     def call_impl(self, **kwargs: Any) -> GetAdcpCapabilitiesResponse:
         """Call ``_get_adcp_capabilities_impl`` directly (no wire)."""
@@ -109,21 +112,6 @@ class CapabilitiesEnv(IntegrationEnv):
         can never disagree on the verb.
         """
         return "post" if self._rest_has_body else "get"
-
-    def _run_rest_request(self, endpoint: str, **kwargs: Any) -> Any:
-        """Dispatch capabilities over REST with the request-derived verb.
-
-        The inherited implementation always POSTs a JSON body; ``/api/v1/capabilities``
-        is a parameterless GET today, so a blind POST would 405. Build the body
-        (which sets the verb), then GET the parameterless route or POST the body
-        when params are present. Everything before the verb (identity pop, factory
-        commit, auth-dep override) is reused via ``_prepare_rest_request``.
-        """
-        client, _identity = self._prepare_rest_request(kwargs)
-        body = self.build_rest_body(**kwargs)
-        if self.REST_METHOD == "get":
-            return client.get(endpoint)
-        return client.post(endpoint, json=body)
 
     def parse_rest_response(self, data: dict[str, Any]) -> GetAdcpCapabilitiesResponse:
         """Parse REST JSON into GetAdcpCapabilitiesResponse."""

@@ -98,7 +98,10 @@ EXPECTED_XFAIL_ROUTES: tuple[str, ...] = (
 
 def test_conftest_e2e_rest_xfail_routes_match_pin() -> None:
     """Every is_e2e_rest xfail route in the BDD conftest is pinned exactly."""
-    tree = ast.parse(_BDD_CONFTEST.read_text())
+    # encoding= is explicit: source files are UTF-8 regardless of the platform
+    # default (cp1252 on Windows), and a non-ASCII character in a pinned reason
+    # string would otherwise decode differently here than in this module.
+    tree = ast.parse(_BDD_CONFTEST.read_text(encoding="utf-8"))
     actual = find_e2e_rest_xfail_conditions(tree)
     expected = sorted(EXPECTED_XFAIL_ROUTES)
     added = [c for c in actual if actual.count(c) > expected.count(c)]
@@ -160,7 +163,8 @@ def _harness_declaration_sites() -> list[tuple[str, str, str]]:
         if path.name.startswith("test_") or path.name == "_realize.py":
             continue
         relpath = f"tests/harness/{path.name}"
-        sites.extend(find_unsupported_declarations(ast.parse(path.read_text()), relpath))
+        # encoding= is explicit — see test_conftest_e2e_rest_xfail_routes_match_pin.
+        sites.extend(find_unsupported_declarations(ast.parse(path.read_text(encoding="utf-8")), relpath))
     return sorted(sites)
 
 
@@ -180,19 +184,6 @@ EXPECTED_UNSUPPORTED_DECLARATIONS: frozenset[tuple[str, str, str]] = frozenset(
             "live stack always serves the agent catalog; an empty catalog cannot be realized over e2e",
         ),
         ("tests/harness/creative_formats.py", "_validate_registry_formats", "<dynamic>"),
-        # UC-010 pricing degrade partitions (PR #1677): the scenario pins the
-        # resolved adapter's declared pricing surface (empty / off-enum) via an
-        # in-process patch on MockAdServer; the live stack's adapter surface is
-        # fixed production code, so the intent has no server realization. The
-        # happy-path @T-UC-010-pricing scenario stays fully live-graded on
-        # e2e_rest (green in the in-network CI job).
-        (
-            "tests/harness/capabilities.py",
-            "set_adapter_pricing_models",
-            "the live stack resolves the tenant's real bound adapter, whose pricing "
-            "surface is fixed production code — a degenerate or off-enum adapter "
-            "cannot be injected over e2e",
-        ),
     }
 )
 
