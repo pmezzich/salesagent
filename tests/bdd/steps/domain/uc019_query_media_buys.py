@@ -2534,11 +2534,10 @@ def then_unavailable_reason_shorthand(ctx: dict, reason: str) -> None:
 # until synced) — the known state the status assertion compares against.
 _POST_CREATE_EXPECTED_STATUS = "pending_creatives"
 
-# Transport envelope framing keys that wrap the GetMediaBuysResponse object on
-# the wire and are legitimately not model fields (A2A merges message/success
-# into the DataPart; the protocol envelope may add status/task_id/context_id).
-# Any OTHER discarded top-level key is a wire regression, not framing.
-_KNOWN_ENVELOPE_KEYS = frozenset({"message", "success", "status", "task_id", "context_id"})
+# The pinned AdCP schema this scenario's response is graded against, resolved
+# through tests.helpers.pinned_schema (the single locator for the installed
+# SDK's schema tree — never a hardcoded spec version or wheel path).
+_GET_MEDIA_BUYS_SCHEMA_REF = "media-buy/get-media-buys-response.json"
 
 # ``confirmed_at`` and ``revision`` are marked REQUIRED on the get-media-buys
 # media-buy item by the pinned AdCP schema — get-media-buys-response.json @ 3.1.1,
@@ -2549,23 +2548,10 @@ _KNOWN_ENVELOPE_KEYS = frozenset({"message", "success", "status", "task_id", "co
 # the model — a separate production boundary, out of scope for this test-wiring
 # PR), NOT schema "version drift". Until the model is fixed, tolerate exactly those
 # two missing-required violations so the schema-valid step still grades every OTHER
-# field faithfully. Mirrors the _KNOWN_ENVELOPE_KEYS allowlist above: name the real
-# gap explicitly so the guard stays honest.
+# field faithfully. Named here, at the one call site that accepts the gap;
+# array_item_validator_for raises if either name stops being required, so the
+# tolerance cannot silently outlive the gap it documents.
 _UNMODELED_REQUIRED = frozenset({"confirmed_at", "revision"})
-
-
-def _load_get_media_buys_response_schema() -> dict[str, Any]:
-    """Load the authoritative bundled AdCP get-media-buys-response JSON Schema.
-
-    adcp==6.6.0 ships it at ``_schemas/3.1/bundled/media-buy/get-media-buys-response.json``;
-    the ``bundled`` variant inlines every ``$ref`` into ``$defs`` so jsonschema
-    validates the document standalone (no resolver/registry needed). Located via the
-    shared ``load_installed_adcp_schema`` helper so the installed-wheel path is
-    derived in one place (tests/helpers/installed_adcp_schema.py).
-    """
-    from tests.helpers.installed_adcp_schema import load_installed_adcp_schema
-
-    return load_installed_adcp_schema("3.1", "bundled", "media-buy", "get-media-buys-response.json")
 
 
 @given("the buyer captured a media_buy_id from a successful create_media_buy response")
@@ -2577,7 +2563,7 @@ def given_buyer_captured_media_buy_id(ctx: dict) -> None:
     create_buy → check_buy_status chain hands to the poll.
     """
     from src.core.schemas import CreateMediaBuyRequest
-    from tests.bdd.steps._outcome_helpers import wire_field
+    from tests.bdd.steps._outcome_helpers import _get_response_field, _unwrap_response, wire_field
     from tests.bdd.steps.generic.given_media_buy import _ensure_request_defaults
 
     req = CreateMediaBuyRequest(**_ensure_request_defaults(ctx))
@@ -2586,7 +2572,7 @@ def given_buyer_captured_media_buy_id(ctx: dict) -> None:
     assert ctx.get("error") is None, f"create_media_buy failed in Given: {ctx.get('error')!r}"
     resp = ctx.get("response")
     assert resp is not None, "create_media_buy returned no response"
-    inner = getattr(resp, "response", resp)
+    inner = _unwrap_response(resp)
     # Capture media_buy_id OFF THE WIRE — the id analogue of the status determinism
     # gate below — so a wire-serialization regression that drops or renames
     # media_buy_id on the a2a DataPart / mcp structured_content trips here instead
@@ -2596,7 +2582,7 @@ def given_buyer_captured_media_buy_id(ctx: dict) -> None:
     # the create actually serialized.
     mb_id = wire_field(ctx, "media_buy_id")
     assert mb_id, f"create_media_buy response carries no media_buy_id on the wire: {inner!r}"
-    inner_id = getattr(inner, "media_buy_id", None)
+    inner_id = _get_response_field(resp, "media_buy_id")
     assert inner_id == mb_id, (
         f"in-process media_buy_id {inner_id!r} diverges from wire media_buy_id {mb_id!r} — "
         "serialization regression on the graded create→get seam"
@@ -2639,73 +2625,39 @@ def when_query_captured_media_buy_id(ctx: dict) -> None:
 
 @then("the response should be schema-valid against get-media-buys-response.json")
 def then_response_schema_valid_get_media_buys(ctx: dict) -> None:
-    """Validate the wire media buys against the bundled AdCP get-media-buys-response schema.
+    """Validate the wire media buys against the pinned AdCP get-media-buys-response schema.
 
-    adcp==6.6.0 bundles the authoritative JSON Schema — ``_schemas/3.1/media-buy/
-    get-media-buys-response.json`` (title "Get Media Buys Response", top-level
-    ``required: [media_buys]``); the ``bundled`` sibling inlines every ``$ref`` into
-    ``$defs`` so jsonschema validates it standalone. That artifact — not
-    ``GetMediaBuysResponse.model_fields`` — grades the wire here.
-
-    Payload is read through the shared ``wire_dict`` helper: the real
+    The pinned SDK schema — not ``GetMediaBuysResponse.model_fields`` — grades the
+    wire here. Payload is read through the shared ``wire_dict`` helper: the real
     ``ctx["wire_response"]`` the buyer received on a2a/mcp (its guard raises if a
     real-wire transport failed to stash it, rather than silently degrading).
 
     ``wire_dict`` is the AdCP PAYLOAD, not the transport-wrapped envelope the whole
-    schema models: the schema's top-level composes a Protocol Envelope of
-    context_id/task_id/status the payload does not carry, and the model serializes
-    optional top-level fields (``context``/``errors``) as explicit ``null`` where
-    the schema types them object/array. Validating the whole document against it
-    would fail on that transport/serialization framing, not on media-buy data. So
-    grade the DATA this scenario is about — each wire media buy against the schema's
-    authoritative ``media_buys`` item definition (resolved against the document's
-    ``$defs``) — plus a top-level shape guard below.
+    schema models: the schema's top level ``allOf``-composes
+    ``core/protocol-envelope.json``, which REQUIRES ``status`` — and the payload
+    does not carry it. Measured on the two transports this scenario runs: a2a's
+    top-level keys are ``media_buys``/``message``/``success`` and mcp's are
+    ``media_buys`` alone, so whole-document validation fails with
+    ``<root>: 'status' is a required property`` on BOTH — on framing, not on
+    media-buy data. So grade the DATA this scenario is about — each wire media buy
+    against the schema's authoritative ``media_buys`` item definition — plus the
+    top-level framing guard the shared oracle applies (a2a's ``message``/``success``
+    exercise it for real).
 
-    Two item-level ``required`` fields (``confirmed_at``/``revision``) are a known
-    PRODUCTION gap, not version drift: the pinned schema marks them required, but
-    production's ``GetMediaBuysMediaBuy`` (src/core/schemas/_base.py) omits them, so
-    the wire cannot carry them. They are dropped from the item's ``required`` list
-    before validating (``_UNMODELED_REQUIRED``) so their absence is tolerated while
-    every OTHER violation on a media buy (a retyped id, a dropped item-level status,
-    a malformed package) still fails loud.
+    Both arms live in ``tests.helpers.wire_schema`` so the envelope allowlist and
+    the item-subschema slice have ONE home across transports; the known-production-
+    gap tolerance is this scenario's to declare, so it is passed in explicitly.
     """
-    from jsonschema.validators import Draft7Validator
-
     from src.core.schemas._base import GetMediaBuysResponse
     from tests.bdd.steps._outcome_helpers import wire_dict
+    from tests.helpers.wire_schema import assert_wire_items_schema_valid
 
-    wire = wire_dict(ctx)
-
-    # Top-level shape guard. The schema admits extra top-level keys
-    # (``additionalProperties: true``, for envelope framing), so a wire regression
-    # that ADDS a bogus top-level key would pass validation unseen — reject any
-    # top-level key that is neither a GetMediaBuysResponse field nor known envelope
-    # framing. (model_fields is used here for shape, NOT as the validation authority.)
-    known_top_level = set(GetMediaBuysResponse.model_fields) | _KNOWN_ENVELOPE_KEYS
-    unexpected = set(wire) - known_top_level
-    assert not unexpected, (
-        f"unexpected top-level wire keys {sorted(unexpected)} — neither "
-        "GetMediaBuysResponse fields nor known envelope framing; a wire "
-        "regression may have added a bogus field"
-    )
-    media_buys = wire.get("media_buys")
-    assert isinstance(media_buys, list), f"wire carries no media_buys array — got {type(media_buys).__name__}"
-
-    # Grade each media buy against the authoritative item schema (declared draft-07,
-    # matching the repo's other schema validators; $defs carried so internal $refs
-    # resolve). Express the known-missing-required tolerance against the SCHEMA —
-    # drop the two unmodeled fields from the item's ``required`` list — rather than
-    # pattern-matching jsonschema's error message (presentation, not contract): a
-    # message reword would silently stop matching and flip every transport red.
-    # Every other required field, and all non-required constraints, still grade.
-    schema = _load_get_media_buys_response_schema()
-    item_schema = {**schema["properties"]["media_buys"]["items"], "$defs": schema.get("$defs", {})}
-    item_schema["required"] = [name for name in item_schema.get("required", []) if name not in _UNMODELED_REQUIRED]
-    validator = Draft7Validator(item_schema)
-    violations = [(idx, err) for idx, media_buy in enumerate(media_buys) for err in validator.iter_errors(media_buy)]
-    assert not violations, "get-media-buys-response.json schema violations on the wire:\n" + "\n".join(
-        f"  media_buys[{idx}] at /{'/'.join(str(p) for p in err.absolute_path)}: {err.message}"
-        for idx, err in violations
+    assert_wire_items_schema_valid(
+        wire_dict(ctx),
+        schema_ref=_GET_MEDIA_BUYS_SCHEMA_REF,
+        item_key="media_buys",
+        model=GetMediaBuysResponse,
+        known_missing_required=_UNMODELED_REQUIRED,
     )
 
 
