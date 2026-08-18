@@ -7,18 +7,13 @@ SQL IN (...) query. Uses the CreativeListEnv harness, mirroring
 test_list_creatives_auth.py.
 """
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 from adcp import CreativeFilters
 
-from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
 from src.core.exceptions import AdCPValidationError
-from src.core.tools.creatives.listing import _CAPPED_FILTER_FIELDS, _MAX_FILTER_LIST_LEN
-from tests.factories.principal import PrincipalFactory
+from src.core.tools.creatives.listing import _MAX_FILTER_LIST_LEN
 from tests.harness import CreativeListEnv
 from tests.harness.transport import Transport
-from tests.helpers import pinned_schema
 
 # Wire transports only — IMPL has no wire envelope. The cap raises from
 # _enforce_filter_list_caps inside _build_list_creatives_request, a
@@ -110,76 +105,12 @@ class TestListCreativesFilterCap:
             )
 
 
-_A2A_IDENTITY = PrincipalFactory.make_identity(
-    principal_id="test_principal", tenant_id="test_tenant", tenant={"tenant_id": "test_tenant"}, protocol="a2a"
-)
-
-
-@pytest.mark.asyncio
-async def test_a2a_list_creatives_handler_forwards_projection_and_enrichment_params():
-    """The A2A list_creatives skill handler forwards every projection/enrichment param.
-
-    ``list_creatives_raw`` accepts ``fields`` / ``include_performance`` /
-    ``include_assignments`` / ``include_sub_assets`` (listing.py:606-609) and the REST
-    route forwards all four (api_v1.py:449-452). The A2A skill handler previously passed
-    none of them, so an A2A client asking for a field projection, performance metrics,
-    package assignments, or sub-assets silently got the defaults. This pins that the
-    handler now forwards all four with the values the client sent.
-    """
-    handler = AdCPRequestHandler()
-    with patch("src.a2a_server.adcp_a2a_server.core_list_creatives_tool") as mock_core_tool:
-        mock_core_tool.return_value = MagicMock()
-        parameters = {
-            "fields": ["creative_id", "name"],
-            "include_performance": True,
-            "include_assignments": True,
-            "include_sub_assets": True,
-        }
-
-        await handler._handle_list_creatives_skill(parameters, _A2A_IDENTITY)
-
-    # call_count + call_args.kwargs rather than a bare assert_called_once() + call_args,
-    # which the weak-mock-assertion guard forbids as a new violation.
-    assert mock_core_tool.call_count == 1
-    call_kwargs = mock_core_tool.call_args.kwargs
-    assert call_kwargs["fields"] == ["creative_id", "name"]
-    assert call_kwargs["include_performance"] is True
-    assert call_kwargs["include_assignments"] is True
-    assert call_kwargs["include_sub_assets"] is True
-
-
-# The AdCP JSON schema is the authority for what CreativeFilters declares.
-# tests/helpers/pinned_schema.py reads it from the installed adcp SDK's own schema
-# tree: the SDK's installed version IS the pin. #1868 retired the separately
-# vendored fixture tree (it had drifted a full spec-minor behind), so there is now
-# exactly one upstream pin. Deriving the expected set from
-# ``CreativeFilters.model_fields`` instead would grade one wheel-derived artifact
-# against another, so the schema — not the model — stays the source.
-_PINNED_CREATIVE_FILTERS_REF = "core/creative-filters.json"
-
-
-def _pinned_array_filter_fields() -> set[str]:
-    """Array-typed properties of the pinned ``creative-filters.json`` schema."""
-    schema = pinned_schema.load(_PINNED_CREATIVE_FILTERS_REF)
-    fields = {name for name, spec in schema["properties"].items() if spec.get("type") == "array"}
-    assert fields, f"non-vacuity: {_PINNED_CREATIVE_FILTERS_REF} declared no array-typed properties"
-    return fields
-
-
-def test_capped_fields_match_pinned_schema_array_filters():
-    """_CAPPED_FILTER_FIELDS is hand-maintained — pin it against the SDK-pinned schema.
-
-    Every array-typed CreativeFilters property expands into an ``IN (...)``
-    predicate, so every one of them must be capped. If a future pin refresh adds
-    an array filter, this fails and the new field must be added to the cap (or
-    explicitly excluded here with a reason) — no list filter slips through
-    uncapped silently.
-    """
-    pinned = _pinned_array_filter_fields()
-    capped = set(_CAPPED_FILTER_FIELDS)
-
-    assert pinned == capped, (
-        f"{_PINNED_CREATIVE_FILTERS_REF} array filters diverged from _CAPPED_FILTER_FIELDS — "
-        f"schema-only (uncapped, would expand into IN (...)): {sorted(pinned - capped)}, "
-        f"cap-only (not a schema array filter): {sorted(capped - pinned)}"
-    )
+# The cap's schema-parity guard and the A2A projection-forwarding test used to live
+# here. Both are DB-free, and a file under tests/integration/ never runs at the
+# pre-commit gate (`make quality` and the tox `unit` env both scope to tests/unit/),
+# so the "no array filter slips through uncapped" invariant was outside the gate it
+# exists to hold. They now live in tests/unit/:
+#   - tests/unit/test_architecture_list_creatives_filter_cap_parity.py
+#   - tests/unit/test_a2a_parameter_mapping.py
+#     (test_list_creatives_forwards_projection_and_enrichment_params)
+# What stays here is what genuinely needs Postgres: the behavioral cap tests above.

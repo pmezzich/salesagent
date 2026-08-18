@@ -10,7 +10,7 @@ CRITICAL: These tests catch protocol mismatches like 'updates' vs 'packages'
 before they reach production.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from adcp.types import AccountReference as LibraryAccountReference
@@ -325,3 +325,43 @@ class TestA2AParameterMapping:
             error_message = str(exc_info.value).lower()
             assert "brand" in error_message, "Error message should mention missing 'brand'"
             assert "packages" in error_message, "Error message should mention missing 'packages'"
+
+    def test_list_creatives_forwards_projection_and_enrichment_params(self):
+        """The A2A list_creatives skill handler forwards every projection/enrichment param.
+
+        ``list_creatives_raw`` accepts ``fields`` / ``include_performance`` /
+        ``include_assignments`` / ``include_sub_assets`` and the REST route forwards all
+        four (api_v1.py ListCreativesBody). The A2A skill handler previously passed none
+        of them, so an A2A client asking for a field projection, performance metrics,
+        package assignments, or sub-assets silently got the defaults. This pins that the
+        handler now forwards all four with the values the client sent.
+
+        Value-level companion to ``test_architecture_a2a_list_creatives_forwarding.py``,
+        which pins the same handler's forwarded param NAMES against the raw wrapper's
+        signature but never reads the values.
+        """
+        from src.a2a_server.adcp_a2a_server import AdCPRequestHandler
+
+        handler = AdCPRequestHandler()
+
+        with patch("src.a2a_server.adcp_a2a_server.core_list_creatives_tool") as mock_core_tool:
+            mock_core_tool.return_value = MagicMock()
+            parameters = {
+                "fields": ["creative_id", "name"],
+                "include_performance": True,
+                "include_assignments": True,
+                "include_sub_assets": True,
+            }
+
+            import asyncio
+
+            asyncio.run(handler._handle_list_creatives_skill(parameters=parameters, identity=_MOCK_IDENTITY))
+
+        # call_count + call_args.kwargs rather than a bare assert_called_once() + call_args,
+        # which the weak-mock-assertion guard forbids as a new violation.
+        assert mock_core_tool.call_count == 1
+        call_kwargs = mock_core_tool.call_args.kwargs
+        assert call_kwargs["fields"] == ["creative_id", "name"]
+        assert call_kwargs["include_performance"] is True
+        assert call_kwargs["include_assignments"] is True
+        assert call_kwargs["include_sub_assets"] is True
