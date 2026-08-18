@@ -32,10 +32,11 @@ import ast
 
 from src.core.tools.creatives.listing import list_creatives_raw
 from tests.unit._architecture_helpers import (
+    forwarding_gaps,
     iter_call_expressions,
     parse_module,
-    raw_wrapper_param_names,
     repo_root,
+    stale_forwarding_allowlist_entries,
 )
 
 _A2A_SERVER = repo_root() / "src" / "a2a_server" / "adcp_a2a_server.py"
@@ -78,9 +79,12 @@ def _handler_forwarded_kwargs() -> set[str]:
 
 def test_a2a_list_creatives_handler_forwards_all_raw_params():
     """``_handle_list_creatives_skill`` must forward every param ``list_creatives_raw`` accepts."""
-    expected = raw_wrapper_param_names(list_creatives_raw, plumbing=_TRANSPORT_PARAMS)
-    forwarded = _handler_forwarded_kwargs()
-    missing = expected - forwarded - set(_ALLOWLIST)
+    missing = forwarding_gaps(
+        raw_fn=list_creatives_raw,
+        declared=_handler_forwarded_kwargs(),
+        plumbing=_TRANSPORT_PARAMS,
+        allowlist=_ALLOWLIST,
+    )
     assert not missing, (
         "A2A _handle_list_creatives_skill drops parameters list_creatives_raw() accepts — "
         f"A2A buyers lose these silently: {sorted(missing)}. Forward them in the handler, "
@@ -90,12 +94,11 @@ def test_a2a_list_creatives_handler_forwards_all_raw_params():
 
 def test_a2a_forwarding_allowlist_has_no_stale_entries():
     """Allowlist entries must be real raw-wrapper params still missing from the handler."""
-    expected = raw_wrapper_param_names(list_creatives_raw, plumbing=_TRANSPORT_PARAMS)
-    forwarded = _handler_forwarded_kwargs()
-    stale = []
-    for param in _ALLOWLIST:
-        if param not in expected:
-            stale.append(f"  {param}: not a parameter of list_creatives_raw()")
-        elif param in forwarded:
-            stale.append(f"  {param}: now forwarded by the handler — remove from allowlist")
+    stale = stale_forwarding_allowlist_entries(
+        raw_fn=list_creatives_raw,
+        declared=_handler_forwarded_kwargs(),
+        plumbing=_TRANSPORT_PARAMS,
+        allowlist=_ALLOWLIST,
+        declared_desc="forwarded by the handler",
+    )
     assert not stale, "Stale A2A-forwarding allowlist entries:\n" + "\n".join(stale)
