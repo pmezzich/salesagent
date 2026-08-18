@@ -6,6 +6,7 @@ from adcp import PushNotificationConfig
 
 from src.core.log_safety import REDACTED, redact_push_notification_config
 from tests.factories import PushNotificationConfigFactory
+from tests.helpers.adcp_factories import wire_push_notification_config
 
 # adcp's PushNotificationConfig enforces a >=32-char credential, so use one that
 # clears the bar (the helper never inspects the value, only its presence).
@@ -15,14 +16,14 @@ _SECRET = "buyer-webhook-bearer-token-do-not-log"
 def _wire_cfg(**overrides):
     """Real SDK ``PushNotificationConfig`` with a credential-bearing typed auth.
 
-    Built via ``model_validate`` exactly as media_buy_create's call site does.
-    The double IS the production model, so it cannot drift from the shape the
-    helper sees in production — the divergence a hand-rolled stub would hide.
+    The wire dict comes from the shared ``wire_push_notification_config`` builder
+    — the same scaffold the integration log-site tests feed to production — and is
+    built via ``model_validate`` exactly as the wire boundary does. The double IS
+    the production model, so it cannot drift from the shape the helper sees in
+    production; sourcing the dict from one builder keeps it from drifting from the
+    other test layer either.
     """
-    data: dict = {
-        "url": "https://buyer.example/webhook",
-        "authentication": {"schemes": ["Bearer"], "credentials": _SECRET},
-    }
+    data: dict = wire_push_notification_config(credentials=_SECRET)
     data.update(overrides)
     return PushNotificationConfig.model_validate(data)
 

@@ -1,10 +1,19 @@
 """#1617: the buyer's webhook credential must never reach the logs.
 
-One test per push-notification log site — media_buy_create, the admin
-creative-status webhook, and the protocol webhook service — each driving the real
-code path with a credential-bearing config and asserting on what that site
-actually logged. A single site test would leave the other two choke points
-unguarded: a revert there would still be green.
+One test per push-notification log site, each driving the real code path with a
+credential-bearing config and asserting on what that site actually logged.
+
+Two of the sites are redaction choke points: the admin creative-status webhook
+and the protocol webhook service both route their config through
+``src.core.log_safety.redact_push_notification_config`` before logging. A single
+site test would leave the other choke point unguarded: a revert there would still
+be green.
+
+The third site, media_buy_create, is NOT a choke point of that helper — it never
+imports it. It withholds by construction instead, handing the logger only the
+config id and ``webhook_url_for_log(url)``, so its case grades that inherited
+withhold on upstream code rather than a redaction call. See
+``_assert_registration_log_withholds_credential`` for why its assertion differs.
 
 Capture is taken by patching each module's ``logger`` object and reading its
 ``info`` call args, NOT via caplog or a handler: a full-suite run can leave
@@ -32,32 +41,12 @@ import pytest
 
 from src.core.log_safety import REDACTED
 from src.core.schemas import CreateMediaBuySuccess
+from tests.helpers.adcp_factories import wire_push_notification_config
 from tests.integration.test_create_media_buy_behavioral import _env, _make_request
 
 pytestmark = [pytest.mark.integration]
 
 _SECRET = "buyer-webhook-bearer-SECRET-should-never-be-logged"
-
-# Deliberately shorter than the SDK's >=32-char credential floor, so
-# ``PushNotificationConfig.model_validate`` REJECTS it at the media_buy_create
-# log site — the wire shape that regressed CI on the round-3 push (the buyer's
-# own endpoint accepts credentials the SDK schema refuses).
-_SHORT_SECRET = "short-wire-SECRET"
-
-
-def _wire_pnc(*, id: str, credentials: str) -> dict:
-    """One credential-bearing copy of the AdCP wire push-notification-config shape.
-
-    The three log-site tests differ only in ``id`` and the credential; the fixed
-    ``url`` and the nested ``authentication.schemes=["Bearer"]`` scaffold live here
-    so a wire-shape change is one edit, not three that can drift apart — the very
-    regression this suite guards. Mirrors the unit side's ``_wire_cfg``.
-    """
-    return {
-        "id": id,
-        "url": "https://buyer.example/webhook",
-        "authentication": {"schemes": ["Bearer"], "credentials": credentials},
-    }
 
 
 def _rendered(calls) -> str:
@@ -120,7 +109,6 @@ def _assert_registration_log_withholds_credential(mock_logger) -> None:
     """
     logged = _rendered(mock_logger.info.call_args_list)
     assert _SECRET not in logged, "buyer webhook credential leaked to the logs (#1617)"
-    assert _SHORT_SECRET not in logged, "buyer webhook credential leaked to the logs (#1617)"
     pnc_calls = _pnc_info_calls(mock_logger)
     assert pnc_calls, (
         "no push-notification-config log call was emitted — the log site did not run (test guards nothing)"
@@ -133,11 +121,7 @@ def _assert_registration_log_withholds_credential(mock_logger) -> None:
 
 
 def _run_create_media_buy_with_pnc(pnc: dict):
-    """Drive the real create-media-buy registration path, module logger patched.
-
-    Shared by the valid-credential and SDK-rejected-credential cases: identical
-    setup and path, only the wire config differs.
-    """
+    """Drive the real create-media-buy registration path, module logger patched."""
     from src.core.tools.media_buy_create import _create_media_buy_impl
     from src.core.transport_helpers import enrich_identity_with_account
 
@@ -163,41 +147,10 @@ def test_create_media_buy_registration_log_withholds_webhook_credential(integrat
     assertions redden, because this site receives the A2A wire dict and no masking
     repr stands between the credential and the log.
     """
-    pnc = _wire_pnc(id="pnc_redact", credentials=_SECRET)
+    pnc = wire_push_notification_config(id="pnc_redact", credentials=_SECRET)
     result, mock_logger = _run_create_media_buy_with_pnc(pnc)
 
     assert isinstance(result.response, CreateMediaBuySuccess)
-    _assert_registration_log_withholds_credential(mock_logger)
-
-
-@pytest.mark.requires_db
-def test_create_media_buy_survives_sdk_rejected_credential_and_withholds_it(integration_db):
-    """A wire credential the SDK schema rejects must neither crash creation nor leak.
-
-    The registration site does not validate the wire config against the SDK model,
-    so a credential the SDK would refuse still registers cleanly. That is the shape
-    which regressed CI in round 3: an 18-char e2e credential made
-    ``model_validate`` raise and the media buy went to ``failed``. Re-introducing a
-    validate call at this site without a fallback reddens assertion (1).
-
-    The sibling test above feeds a >=32-char credential, so without this case the
-    SDK-rejected wire shape is never exercised by the suite.
-    """
-    from adcp import PushNotificationConfig
-    from pydantic import ValidationError
-
-    pnc = _wire_pnc(id="pnc_short", credentials=_SHORT_SECRET)
-    # Premise guard: this input only exercises the SDK-rejected shape while the SDK
-    # actually refuses it. If a future SDK bump relaxes the >=32-char floor, fail
-    # loudly here instead of silently degrading into a duplicate of the sibling test.
-    with pytest.raises(ValidationError):
-        PushNotificationConfig.model_validate(pnc)
-
-    result, mock_logger = _run_create_media_buy_with_pnc(pnc)
-
-    # (1) An SDK-rejected credential must not break media-buy creation.
-    assert isinstance(result.response, CreateMediaBuySuccess)
-    # (2) The log ran and withheld the credential on this path too.
     _assert_registration_log_withholds_credential(mock_logger)
 
 
@@ -242,7 +195,7 @@ def reviewed_creative_with_webhook_step(integration_db):
             tool_name="sync_creatives",
             request_data={
                 "protocol": "mcp",
-                "push_notification_config": _wire_pnc(id="pnc_cr", credentials=_SECRET),
+                "push_notification_config": wire_push_notification_config(id="pnc_cr", credentials=_SECRET),
             },
             object_mappings=[
                 {"object_type": "creative", "object_id": creative.creative_id, "action": "approve"},

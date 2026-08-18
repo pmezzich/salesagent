@@ -183,7 +183,7 @@ class ProtocolWebhookService:
 
         # Single redaction path (#1617) — the authentication credential is never logged.
         logger.info(
-            "push_notification_config (sanitized): %s",
+            "push_notification_config: %s",
             redact_push_notification_config(push_notification_config),
         )
 
