@@ -291,10 +291,9 @@ def _get_adcp_capabilities_impl(
     # reports none (or only unrecognized values) leaves the field None (unknown)
     # rather than an empty list.
     #
-    # None is wire-safe by OMISSION on REST/A2A only (Pydantic exclude-none drops
-    # the key); MCP currently serializes an explicit `null`, which is schema-invalid
-    # for this field — pre-existing, repo-wide, tracked as a transport-level
-    # exclude-none follow-up (not introduced here).
+    # None is wire-safe by OMISSION on every transport: REST/A2A drop the key via
+    # Pydantic exclude-none, and MCP returns through mcp_result(), whose
+    # model_dump(mode="json") omits it as well (#1710, fixed by #1868).
     supported_pricing_models = None
     if adapter and hasattr(adapter, "get_supported_pricing_models"):
         try:

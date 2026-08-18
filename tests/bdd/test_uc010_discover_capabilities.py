@@ -14,9 +14,7 @@ shape as UC-018).
 Parametrized across [a2a, mcp, rest] (+ e2e_rest when BDD_E2E_ENABLED=true) via
 ``pytest_generate_tests`` — the wired scenarios carry no transport tag. The
 degrade partitions inject their adapter surface in-process, so their e2e_rest
-legs xfail via the env's ``E2EUnsupportedSetup`` declaration; the degrade
-scenario's [mcp] leg is strict-xfailed against #1710 (MCP emits explicit null
-for absent optionals) in the conftest collection hook.
+legs xfail via the env's ``E2EUnsupportedSetup`` declaration.
 """
 
 from __future__ import annotations

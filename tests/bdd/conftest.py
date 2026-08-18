@@ -1080,26 +1080,11 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             if tag in marker_names:
                 item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
 
-        # --- UC-010: pricing degrade partition — MCP serializes explicit null (#1710) ---
-        # When the adapter reports no pricing models the field must be ABSENT on
-        # the wire (minItems: 1 forbids [], the non-nullable array schema forbids
-        # null). REST/A2A omit the key via exclude-none; MCP's structured_content
-        # serializes an explicit `null`, which the pinned 3.1.1 response schema
-        # rejects. Pre-existing and repo-wide (~12 sibling optionals), tracked in
-        # #1710 — strict, so the transport-level exclude-none fix surfaces as an
-        # xpass here instead of being silently swallowed.
-        if "T-UC-010-pricing-degrade" in marker_names and is_mcp:
-            item.add_marker(
-                pytest.mark.xfail(
-                    reason=(
-                        "SPEC-PRODUCTION GAP (#1710): MCP structured_content emits "
-                        "supported_pricing_models: null when the field is absent; the pinned "
-                        "3.1.1 schema types it as a non-nullable array. REST/A2A omit the key "
-                        "correctly."
-                    ),
-                    strict=True,
-                )
-            )
+        # Graduated (#1710, closed 2026-08-11 by #1868): MCP no longer serializes an
+        # explicit null for an absent supported_pricing_models. capabilities.py now
+        # returns through mcp_result(), whose model_dump(mode="json") omits the key,
+        # so the [mcp] node passes alongside [a2a]/[rest]. The xfail was strict
+        # precisely so the transport-level fix would surface here as an xpass.
 
         # UC-006: assignment_package_validation — PACKAGE_NOT_FOUND outcome not
         # wired in the Then step dispatch (raises ValueError). The production

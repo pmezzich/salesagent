@@ -191,9 +191,8 @@ def then_pricing_models_absent(ctx: dict) -> None:
 
     ``minItems: 1`` makes ``[]`` unserializable, and an explicit ``null`` is
     schema-invalid for the non-nullable array — absence is the only wire-legal
-    encoding. REST/A2A omit via exclude-none; MCP currently serializes ``null``
-    and its param is strict-xfailed against #1710 in the conftest collection
-    hook (pre-existing, repo-wide, not introduced by this PR).
+    encoding. REST/A2A omit via exclude-none; MCP omits it through
+    ``mcp_result()``'s ``model_dump(mode="json")`` (#1710, fixed by #1868).
     """
     error = ctx.get("error")
     assert error is None, f"degraded capabilities read must still succeed, got: {error!r}"
