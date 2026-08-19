@@ -105,6 +105,7 @@ _CAPPED_FILTER_FIELDS = (
     "assigned_to_packages",
 )
 
+
 def _coerce_blob_dict(value: Any, field_label: str, *, log_context: str = "") -> dict[str, Any] | None:
     """Coerce an untyped JSON-blob value to a spec object (dict) field.
 
