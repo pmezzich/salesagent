@@ -2831,6 +2831,14 @@ _ADMIN_TAG_PREFIX = "T-ADMIN-"
 # variant would 404). get_media_buys (UC-019) is A2A/MCP-only.
 _NO_REST_UC_TAG_PREFIXES = ("T-UC-019-",)
 
+# Send-time webhook scenarios that assert in-process mock/circuit-breaker state.
+# Do NOT append e2e_rest (false-green) and do NOT grow _UC004_E2E_WEBHOOK_INTERNAL_TAGS.
+_NO_E2E_REST_TAGS: frozenset[str] = frozenset(
+    {
+        "T-UC-004-webhook-ssrf-blocked",
+    }
+)
+
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
     """Parametrize BDD scenarios across the wire transports (a2a/mcp/rest).
@@ -2886,8 +2894,11 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         ids = ["a2a", "mcp"]
 
     if os.environ.get("BDD_E2E_ENABLED") == "true" and not no_rest_uc:
-        transports.append(Transport.E2E_REST)
-        ids.append("e2e_rest")
+        # In-process-only webhook scenarios have no e2e-observable surface —
+        # skip e2e_rest rather than xfail (shrink-only ratchet / false-green).
+        if not (marker_names & _NO_E2E_REST_TAGS):
+            transports.append(Transport.E2E_REST)
+            ids.append("e2e_rest")
 
     metafunc.parametrize("ctx", transports, ids=ids, indirect=True)
 
@@ -3361,7 +3372,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
 
     elif uc == "UC-006":
         marker_names = {m.name for m in request.node.iter_markers()}
-        if marker_names & {"account", "creative-invariant", "BR-RULE-034"}:
+        if marker_names & {"account", "creative-invariant", "BR-RULE-034", "webhook-ssrf"}:
             # CreativeSyncEnv exercises the full sync_creatives transport wrappers.
             # @account scenarios drive account resolution (enrich_identity_with_account());
             # @creative-invariant scenarios (#1399 R3-F2) drive the success-variant
@@ -3369,6 +3380,7 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
             # @BR-RULE-034 scenarios drive cross-principal isolation (triple-key
             # creative lookup) — dormant until the cross-principal existence-gate
             # fix (PR #1430 review) made the surface safe to grade.
+            # @webhook-ssrf scenarios grade registration SSRF on push_notification_config.url.
             from tests.harness.creative_sync import CreativeSyncEnv
 
             with _db_scope_for(request, e2e_config), CreativeSyncEnv(e2e_config=e2e_config) as env:
@@ -3398,6 +3410,12 @@ def _harness_env(request: pytest.FixtureRequest, ctx: dict) -> Generator[None, N
         # boundary/other filter siblings) have no step definitions yet, so xfail
         # fast at the fixture (mirrors UC-002/006/011) rather than spinning up a
         # DB per scenario only to auto-xfail at the first missing step.
+        #
+        # When the dormant all-fields boundary scenarios are wired, their Then must
+        # assert value-when-present, not key-presence-of-13: list_creatives drops a
+        # corrupt tags/assets blob to absent and collapses an empty stored tags list
+        # to omission (both conformant at 3.1.1) — see the #1508 reconciliation note
+        # in test_uc018_list_creatives.py's module docstring.
         #
         # BR-RULE-034 is unambiguous here: this branch only runs for T-UC-018-*
         # scenarios (see _detect_uc), so the tag never collides with the UC-006
