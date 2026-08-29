@@ -3,7 +3,6 @@
 Extends adcp library account types per pattern #1 (schema inheritance).
 All classes are re-exported from ``src.core.schemas`` for backward compatibility.
 
-beads: salesagent-x79
 
 SDK 5.7 type:ignore tracking (adcontextprotocol/adcp-client-python#913):
 - [misc] on line ~127: SyncAccountsResponse class def. Pydantic metaclass
@@ -12,7 +11,7 @@ SDK 5.7 type:ignore tracking (adcontextprotocol/adcp-client-python#913):
   Architectural; permanent.
 """
 
-from typing import Any
+from typing import ClassVar
 
 from adcp.types import Account as LibraryAccountDomain
 from adcp.types import Error as LibraryError
@@ -25,14 +24,19 @@ from adcp.types.generated_poc.core.brand_ref import BrandReference as LibraryBra
 from pydantic import ConfigDict
 
 from src.core.config import get_pydantic_extra_mode
-from src.core.schemas._base import NestedModelSerializerMixin, SalesAgentBaseModel
+from src.core.schemas._base import (
+    AlwaysIncludeFieldsMixin,
+    CompletedTaskStatusMixin,
+    NestedModelSerializerMixin,
+    SalesAgentBaseModel,
+)
 
 # ---------------------------------------------------------------------------
 # Core domain Account (used in ListAccountsResponse.accounts)
 # ---------------------------------------------------------------------------
 
 
-class Account(LibraryAccountDomain):
+class Account(AlwaysIncludeFieldsMixin, LibraryAccountDomain):
     """Extends library Account with salesagent model_config.
 
     Library provides: account_id, name, advertiser, billing_proxy, status,
@@ -42,18 +46,12 @@ class Account(LibraryAccountDomain):
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
-    # POST-S3: Buyer knows advertiser, rate_card, and payment_terms.
-    # Library model_dump defaults exclude_none=True which strips these when
-    # None.  Override to always include them so callers can distinguish
-    # "field absent" from "field=null".
-    _ALWAYS_INCLUDE = {"advertiser", "rate_card", "payment_terms"}
-
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        result = super().model_dump(**kwargs)
-        for field in self._ALWAYS_INCLUDE:
-            if field not in result:
-                result[field] = getattr(self, field, None)
-        return result
+    # Derived from the pin, not declared. core/account.json types advertiser,
+    # rate_card and payment_terms as plain non-nullable optionals and lists none of
+    # them in `required`, so the intersection is empty and all three are omitted
+    # when null. Declaring them always-include emitted a document that FAILED
+    # validation against that schema, on list_accounts — a registered A2A skill.
+    _PINNED_SCHEMA_REF: ClassVar[str] = "core/account.json"
 
 
 # ---------------------------------------------------------------------------
@@ -137,30 +135,52 @@ class SyncResponseAccount(SalesAgentBaseModel):
     setup: LibrarySetup | None = None
 
 
-class SyncAccountsResponse(NestedModelSerializerMixin, LibrarySyncAccountsSuccess):  # type: ignore[misc]
+class SyncAccountsResponse(
+    CompletedTaskStatusMixin,
+    NestedModelSerializerMixin,
+    LibrarySyncAccountsSuccess,  # type: ignore[misc]
+):
     """Extends library SyncAccountsResponse success variant.
 
     adcp 3.10: SyncAccountsResponse is a union TypeAlias (not RootModel).
     Since the error variant is never constructed (ToolError handles failures),
     we subclass the success variant directly.
 
-    adcp 6.6 restored the fields SDK 5.7 had collapsed off the success envelope:
-    dry_run, context (ContextObject|None) and ext (ExtensionObject|None) are all
-    INHERITED from the parent again (identical definitions; production may assign
-    raw dicts to context/ext, which Pydantic coerces on validation). Only
-    ``accounts`` remains overridden — see below.
+    SDK 5.7 had collapsed the success envelope to just `status`, and this class
+    carried local copies of accounts/dry_run/context/ext as a result. adcp 6.6
+    re-added all four, typed, so only `accounts` is still declared here — and only
+    to narrow its item type (Pattern #4). The rest are inherited.
     """
 
     model_config = ConfigDict(extra=get_pydantic_extra_mode())
 
-    # Override accounts to use our SyncResponseAccount (Pattern #4: nested
-    # serialization) — the parent's Account type lacks action/status/errors/setup,
-    # and the local type is needed for correct deserialization on transport roundtrip.
-    # `accounts` is REQUIRED (no default): AdCP 3.1 sync-accounts-response is
-    # oneOf(SyncAccountsSuccess requires `accounts` | SyncAccountsError requires
-    # `errors`). This model is the success variant, so omitting `accounts`
-    # entirely is invalid (it would be neither a valid success nor error). May
-    # be an empty list for a zero-account sync, but the field must be present.
+    # Protocol-envelope `status` comes from CompletedTaskStatusMixin (composed above).
+    # account/sync-accounts-response.json composes the envelope arm via a top-level
+    # allOf, and this class is a TEMPORARY adopter: at adcp 6.6
+    # SyncAccountsSuccessResponse has no ProtocolEnvelope in its MRO and no status
+    # field, so the mixin is ADDITIVE here and deletes as a no-op the day the SDK
+    # ships the field.
+    #
+    # "completed" is invariant rather than a TaskStatus: the pinned response's oneOf
+    # arms are [['accounts'], ['errors']] with NO submitted arm, the error variant is
+    # never constructed here, and sync_accounts models approval PER ACCOUNT
+    # (src/core/tools/accounts.py) rather than per task — so the task itself always
+    # completes. Same shape and same obsolescence condition as SyncCreativesResponse
+    # (src/core/schemas/creative.py, GH #1710).
+
+    # Pattern #4: narrowed to SyncResponseAccount for proper deserialization on
+    # transport roundtrip. `accounts` is REQUIRED (no default): AdCP 3.1
+    # sync-accounts-response is oneOf(SyncAccountsSuccess requires `accounts` |
+    # SyncAccountsError requires `errors`). This model is the success variant, so
+    # omitting `accounts` entirely is invalid (it would be neither a valid success
+    # nor error). May be an empty list for a zero-account sync, but must be present.
+    #
+    # dry_run / context / ext are NOT redeclared. They carried a stale "SDK 5.7
+    # removed these from the parent" note; adcp 6.6 re-added all three, typed, and
+    # the SyncCreativesResponse twin already inherits them. Two of the local copies
+    # were also strictly worse: `context` widened to accept a raw dict although
+    # SyncAccountsRequest.context is itself a ContextObject, and `ext` weakened the
+    # parent's ExtensionObject to a bare dict while no construction site passes it.
     accounts: list[SyncResponseAccount]
 
     def __str__(self) -> str:
