@@ -5,7 +5,13 @@ No patches needed (pure DB read).
 
 Requires: integration_db fixture + existing media buys in the DB.
 
-beads: salesagent-4n0
+The dispatch itself lives in ``MediaBuyListDispatchMixin`` so a composite env can
+reuse it verbatim: ``MediaBuyCreateListEnv`` (tests/harness/media_buy_create_list.py)
+needs the SAME get_media_buys dispatch alongside the create path, and a second copy
+of these bodies would be a DRY violation — the next fix to the list dispatch
+would land in one copy only.
+
+GH #1335, GH #1900
 """
 
 from __future__ import annotations
@@ -14,34 +20,23 @@ from typing import Any
 
 from src.core.schemas._base import GetMediaBuysRequest, GetMediaBuysResponse
 from tests.harness._base import IntegrationEnv
-from tests.harness.media_buy_create import MediaBuyCreateEnv
+from tests.harness.transport import DeliverResult
 
 
-def _is_create_request(kwargs: dict[str, Any]) -> bool:
-    """True when the composite create→list env should route to the create path.
+class MediaBuyListDispatchMixin:
+    """get_media_buys dispatch across impl/A2A/MCP.
 
-    Module-level and greppable, mirroring ``MediaBuyDualEnv``'s
-    ``_is_update_request``. Keyed on the BASE op (create) rather than the added
-    (list) op, though: a create request always arrives as a typed
-    ``req=CreateMediaBuyRequest``, whereas a list request arrives as loose kwargs
-    (``media_buy_ids`` / filters / none) with no single positive marker — so the
-    typed create op is the robust discriminator here.
-    """
-    from src.core.schemas import CreateMediaBuyRequest
+    Deliberately named ``_call_list_*`` / ``_deliver_list_*`` rather than
+    ``call_*`` / ``deliver_*``: the composite env inherits create dispatch from
+    ``MediaBuyCreateEnv`` under those public names and routes to these
+    explicitly, so neither tool's dispatch can shadow the other's by MRO
+    accident.
 
-    return isinstance(kwargs.get("req"), CreateMediaBuyRequest)
-
-
-class _MediaBuyListDispatch(IntegrationEnv):
-    """Canonical get_media_buys dispatch (impl / real-A2A-skill / MCP wrapper).
-
-    Single home for the three list-transport bodies, shared by the standalone
-    list env and the composite create->list env so they cannot drift (Pattern
-    #8). Named ``_call_list_*`` — matching ``MediaBuyDualEnv``'s
-    ``_call_update_*`` (the ``_call_<op>_<transport>`` dispatch-family
-    convention) — rather than ``call_*`` so a subclass that also mixes in a
-    create env can route ``call_*`` per request type and still reach the create
-    env's ``call_*`` via ``super()``.
+    Both spellings exist for one reason each, and neither is a second
+    implementation: ``_deliver_list_*`` returns the ``DeliverResult`` (payload
+    AND wire) that a ``deliver_*`` override must return, and ``_call_list_*``
+    is that same result's ``.payload``, for a caller that routes at the
+    ``call_*`` frame.
     """
 
     def _call_list_impl(self, **kwargs: Any) -> GetMediaBuysResponse:
@@ -51,42 +46,65 @@ class _MediaBuyListDispatch(IntegrationEnv):
         self._commit_factory_data()
         identity = kwargs.pop("identity", self.identity)
         include_snapshot = kwargs.pop("include_snapshot", False)
+
         req = kwargs.pop("req", None)
         if req is None:
             req = GetMediaBuysRequest(**kwargs)
+
         return _get_media_buys_impl(req=req, identity=identity, include_snapshot=include_snapshot)
 
-    def _call_list_a2a(self, **kwargs: Any) -> Any:
+    def _deliver_list_a2a(self, **kwargs: Any) -> DeliverResult:
         """Dispatch get_media_buys through the REAL A2A pipeline (on_message_send).
 
         The production A2A path is ``_handle_get_media_buys_skill`` —
         ``get_media_buys_raw`` has ZERO production callers, so dispatching to it
-        here gave false confidence (#1417): a boundary fix on the raw wrapper
-        made 'A2A' tests green while the real skill handler still leaked bare
-        ValidationErrors.
+        here gave false confidence (#1417): a boundary fix on the raw
+        wrapper made 'A2A' tests green while the real skill handler still
+        leaked bare ValidationErrors.
         """
         return self._run_a2a_handler("get_media_buys", GetMediaBuysResponse, **kwargs)
 
-    def _call_list_mcp(self, **kwargs: Any) -> Any:
-        """Dispatch get_media_buys through the full FastMCP pipeline (in-memory Client).
+    def _deliver_list_mcp(self, **kwargs: Any) -> DeliverResult:
+        """Dispatch get_media_buys through the REAL FastMCP ``Client`` pipeline.
 
-        Uses ``_run_mcp_client`` rather than the legacy ``_run_mcp_wrapper``: the
-        client captures the real ``structured_content`` wire (which ``call_via``
-        stashes into ``wire_response``), while the wrapper discards it — silently
-        making any MCP wire-envelope assertion a tautology. This is the MCP analogue
-        of the #1417 A2A raw-wrapper gap.
+        Was ``_run_mcp_wrapper``, which is deprecated precisely because it hand-builds
+        a mock Context and calls the wrapper directly: it skips the middleware,
+        TypeAdapter validation and the token→DB→identity auth chain, and — the reason
+        it had to change here — it stashes NO ``wire_response``. Every MCP assertion
+        on this tool therefore graded a re-serialized typed payload rather than the
+        bytes a buyer receives, which is exactly the blind spot GH #1900 slipped
+        through. ``_run_mcp_client`` stashes ``structured_content``, the real MCP wire.
         """
         return self._run_mcp_client("get_media_buys", GetMediaBuysResponse, **kwargs)
 
+    def _call_list_a2a(self, **kwargs: Any) -> Any:
+        """The parsed A2A payload for get_media_buys."""
+        return self._deliver_list_a2a(**kwargs).payload
 
-class MediaBuyListEnv(_MediaBuyListDispatch):
+    def _call_list_mcp(self, **kwargs: Any) -> Any:
+        """The parsed MCP payload for get_media_buys."""
+        return self._deliver_list_mcp(**kwargs).payload
+
+
+class MediaBuyListEnv(MediaBuyListDispatchMixin, IntegrationEnv):
     """Integration test environment for _get_media_buys_impl.
 
     No patches — list is read-only, no external service calls.
     """
 
+    # Dispatch declaration: the base owns call_mcp/call_a2a.
+    RESPONSE_MODEL = GetMediaBuysResponse
+
     EXTERNAL_PATCHES: dict[str, str] = {}
-    REST_ENDPOINT = "/api/v1/media-buys/query"
+    # No REST_ENDPOINT, deliberately: get_media_buys has NO REST route. One was
+    # declared here — `/api/v1/media-buys/query` — for a path that exists nowhere in
+    # src/, so the machinery read as though the transport were available and a REST
+    # parametrization would have failed as if production were broken rather than as
+    # if the route were absent. `src/routes/api_v1.py` exposes only POST /media-buys,
+    # PUT /media-buys/{id} and POST /media-buys/delivery.
+    #
+    # The body builder and response parser below OUTLIVE that endpoint on purpose;
+    # see their docstrings.
 
     def _configure_mocks(self) -> None:
         """No mocks needed for read-only list operation."""
@@ -94,14 +112,56 @@ class MediaBuyListEnv(_MediaBuyListDispatch):
     def call_impl(self, **kwargs: Any) -> GetMediaBuysResponse:
         return self._call_list_impl(**kwargs)
 
-    def call_a2a(self, **kwargs: Any) -> Any:
-        return self._call_list_a2a(**kwargs)
+    def deliver_a2a(self, **kwargs: Any) -> DeliverResult:
+        """Dispatch get_media_buys through the real A2A handler pipeline.
 
-    def call_mcp(self, **kwargs: Any) -> Any:
-        return self._call_list_mcp(**kwargs)
+        FIXME(#1928): JUSTIFIED OVERRIDE — does NOT declare A2A_SKILL, so it does
+        not take the base's client-core delegation. The core's UNWRAP parses into
+        the PINNED GetMediaBuysResponse, whose media_buys items REQUIRE
+        `confirmed_at` and `revision` (get-media-buys-response.json); production
+        emits neither, so every response fails that parse. Parsing here with the
+        LOCAL model keeps this env working while the gap stays attributable — a
+        production schema defect, not a dispatch defect, and deliberately not
+        hidden by loosening the core's parse. Delete this override and its
+        `_KNOWN_DELIVER_OVERRIDES` entry when #1928 lands.
+        """
+        return self._deliver_list_a2a(**kwargs)
+
+    def deliver_mcp(self, **kwargs: Any) -> DeliverResult:
+        """Dispatch get_media_buys through the real FastMCP ``Client`` pipeline.
+
+        FIXME(#1928): JUSTIFIED OVERRIDE, and for the SAME reason as
+        :meth:`deliver_a2a` — not the stale one ("uses the legacy
+        ``_run_mcp_wrapper``"), which stopped being true when GH #1900 moved this
+        dispatch onto ``_run_mcp_client``. Declaring MCP_TOOL would route through
+        the client core, whose UNWRAP parses into the PINNED
+        GetMediaBuysResponse; production omits the required `confirmed_at` and
+        `revision` on every media_buys item, so that parse fails. Dispatching
+        here parses with the LOCAL model while still going through the real
+        FastMCP pipeline, so ``wire_response`` carries the true
+        ``structured_content`` — which is what lets the envelope `status`
+        assertions (#1941) grade the actual MCP bytes.
+        """
+        return self._deliver_list_mcp(**kwargs)
+
+    # ---- REST shaping hooks -------------------------------------------------
+    # Declared on THIS class and deliberately NOT on MediaBuyListDispatchMixin.
+    # MediaBuyCreateListEnv is `(MediaBuyListDispatchMixin, MediaBuyCreateEnv)`, so
+    # the mixin precedes MediaBuyCreateEnv in its MRO: a build_rest_body on the mixin
+    # would shadow the CREATE builder for that env and break the create REST arm that
+    # tests/integration/test_harness_rest_refusal.py pins.
 
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        """Convert kwargs to GetMediaBuysBody shape for REST POST."""
+        """Convert kwargs to GetMediaBuysBody shape for REST POST.
+
+        Kept even though this env declares no REST_ENDPOINT, and NOT equivalent to
+        the inherited default: ``BaseTestEnv.build_rest_body`` serializes a ``req``
+        model wholesale via ``model_dump(mode="json", exclude_none=True)`` and returns
+        ``{}`` when there is no ``req`` — it cannot shape the flat kwargs this tool is
+        called with. Deleting the override would silently substitute that generic
+        behavior the moment a get_media_buys REST route is added and REST_ENDPOINT is
+        restored, which is exactly when a wrong body is hardest to notice.
+        """
         body: dict[str, Any] = {}
         for key in ("media_buy_ids", "status_filter", "account_id", "context"):
             if key in kwargs and kwargs[key] is not None:
@@ -111,48 +171,10 @@ class MediaBuyListEnv(_MediaBuyListDispatch):
         return body
 
     def parse_rest_response(self, data: dict[str, Any]) -> GetMediaBuysResponse:
-        """Parse REST response JSON."""
+        """Parse REST response JSON.
+
+        Also not equivalent to the inherited default: ``BaseTestEnv.parse_rest_response``
+        raises NotImplementedError, so dropping this would replace a working parser
+        with a refusal.
+        """
         return GetMediaBuysResponse(**data)
-
-
-class MediaBuyCreateListEnv(_MediaBuyListDispatch, MediaBuyCreateEnv):
-    """Composite create→list env for the UC-019 post-create status poll.
-
-    The post-create poll scenario grades the create→get seam (media-buy
-    index.yaml ``create_buy`` → ``check_buy_status``): the Given drives a REAL
-    ``create_media_buy`` through the current transport and the When polls
-    ``get_media_buys`` for the id the create RETURNED. So this env routes by
-    request type, mirroring ``MediaBuyDualEnv``'s pattern: create requests go to
-    ``MediaBuyCreateEnv`` (adapter/audit/checklist patches) via ``super()``,
-    everything else takes the shared ``_MediaBuyListDispatch`` path (a pure DB
-    read that needs no patches).
-    """
-
-    def call_impl(self, **kwargs: Any) -> Any:
-        if _is_create_request(kwargs):
-            return super().call_impl(**kwargs)
-        return self._call_list_impl(**kwargs)
-
-    def call_a2a(self, **kwargs: Any) -> Any:
-        if _is_create_request(kwargs):
-            return super().call_a2a(**kwargs)
-        return self._call_list_a2a(**kwargs)
-
-    def call_mcp(self, **kwargs: Any) -> Any:
-        if _is_create_request(kwargs):
-            return super().call_mcp(**kwargs)
-        return self._call_list_mcp(**kwargs)
-
-    def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
-        # UC-019 is REST-excluded (_NO_REST_UC_TAG_PREFIXES covers "T-UC-019-"),
-        # so this composite env has no REST list route. Fail loud rather than let
-        # a list request fall through to the inherited create POST
-        # (/api/v1/media-buys) if REST list ever activates — MediaBuyDualEnv
-        # likewise routes REST explicitly instead of inheriting it unrouted.
-        if not _is_create_request(kwargs):
-            raise NotImplementedError(
-                "MediaBuyCreateListEnv has no REST route for get_media_buys "
-                "(UC-019 is REST-excluded); wire an explicit list REST route "
-                "before dispatching a list request over REST."
-            )
-        return super().build_rest_body(**kwargs)
