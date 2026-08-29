@@ -99,12 +99,17 @@ class TestA2ADispatcherDerivesSynthesizedFlag:
     """
 
     class _RaisingEnv:
-        """Minimal env: ``call_a2a`` raises the pre-reconstructed exception."""
+        """Minimal env: ``deliver_a2a`` raises the pre-reconstructed exception.
+
+        ``deliver_a2a`` — not ``call_a2a`` — is the seam ``A2ADispatcher``
+        dispatches through; ``call_a2a`` is now a thin ``.payload`` reader over
+        it, so raising there would never reach the dispatcher's except arm.
+        """
 
         def __init__(self, exc: Exception) -> None:
             self._exc = exc
 
-        def call_a2a(self, **kwargs):
+        def deliver_a2a(self, **kwargs):
             raise self._exc
 
     def _dispatch_reconstructed(self, a2a_exc: Exception):

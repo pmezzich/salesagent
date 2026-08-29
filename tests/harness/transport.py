@@ -14,6 +14,7 @@ Usage::
 from __future__ import annotations
 
 import functools
+import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, TypedDict
@@ -62,6 +63,97 @@ def extract_wire_suggestion(envelope: dict | None) -> str | None:
     return errors[0].get("suggestion") or adcp_error.get("suggestion")
 
 
+def _envelope_from_adcp_error(exc: Exception) -> dict[str, Any] | None:
+    """Build a SYNTHESIZED envelope from an AdCPError instance.
+
+    Used by ImplDispatcher (``tests/harness/dispatchers.py``) to populate the
+    separate ``synthesized_error_envelope`` field — IMPL has no wire by
+    definition and ``wire_error_envelope`` is reserved for real wire bytes
+    captured by REST/MCP/A2A. Production code uses the same
+    ``build_two_layer_error_envelope`` helper at the boundary, so the
+    synthesized envelope matches what production would emit for the same
+    exception. It does NOT verify that a regression in
+    ``build_two_layer_error_envelope`` actually reaches the wire.
+
+    Lives here (not in ``dispatchers.py`` or ``client.py``) because both of
+    those modules need it: ``dispatchers.py`` for the in-process dispatchers,
+    ``client.py`` for the generic ``AdCPTestClient`` error path. Housing it
+    in either would force the other to reach back across the dispatch-core
+    boundary, which is exactly the mutual-lazy-import cycle this module
+    breaks.
+
+    A2A and REST tests asserting on ``result.wire_error_envelope`` see
+    REAL wire bytes:
+        - A2A: the artifact DataPart, attached to the reconstructed
+          ``AdCPError`` as ``_wire_error_envelope`` by
+          ``tests.harness._base._envelope_to_adcp_error``.
+        - REST: the HTTP response body, captured directly by RestDispatcher.
+        - MCP: the JSON string in ``ToolError``, parsed by McpDispatcher.
+    """
+    from src.core.exceptions import AdCPError, build_two_layer_error_envelope
+
+    if isinstance(exc, AdCPError):
+        return build_two_layer_error_envelope(exc)
+    return None
+
+
+def _wire_envelope_from_exception(exc: Exception) -> dict[str, Any] | None:
+    """Prefer the REAL wire envelope stashed by the harness; fall back to synthesized.
+
+    When the A2A pipeline reconstructs an AdCPError from a failed Task's
+    artifact DataPart, ``tests.harness._base._envelope_to_adcp_error``
+    attaches the captured envelope to the exception as
+    ``_wire_error_envelope``. This helper returns that real wire envelope
+    if present; otherwise falls back to ``_envelope_from_adcp_error``
+    (synthesized — same helper production calls).
+    """
+    real_wire = getattr(exc, "_wire_error_envelope", None)
+    if isinstance(real_wire, dict):
+        return real_wire
+    return _envelope_from_adcp_error(exc)
+
+
+def _a2a_wire_envelope_is_synthesized(exc: Exception) -> bool:
+    """True when ``_wire_envelope_from_exception`` had to FALL BACK for *exc*.
+
+    The A2A boundary has two rejection shapes. A failed Task carries the
+    envelope in its artifact DataPart, and a JSON-RPC ``A2AError`` carries it in
+    ``data`` — both are real wire bytes and both get stashed on the reconstructed
+    exception as ``_wire_error_envelope``. But an ``A2AError`` raised with NO
+    ``data`` reaches the buyer as a bare protocol error with no AdCP envelope at
+    all, and the fallback above quietly synthesizes one from the reconstructed
+    exception. That synthesis is indistinguishable from the real thing on
+    ``wire_error_envelope``, so a test can assert a wire contract the buyer never
+    actually receives — a synthesized envelope masquerading as the wire.
+
+    Surfacing the distinction lets a test opt into proving its envelope is real
+    (``assert_wire_error(..., require_real_wire=True)``). The fallback itself is
+    left in place: existing A2A error tests depend on it, and narrowing it is a
+    separate change.
+
+    Lives beside ``_wire_envelope_from_exception`` (whose fallback it detects)
+    rather than in ``dispatchers.py``, for the same reason that helper moved
+    here: the A2A error unwrap is now ``client.py``'s ``unwrap_a2a_error``,
+    shared by both dispatch paths, and it must derive the flag too.
+    """
+    return not isinstance(getattr(exc, "_wire_error_envelope", None), dict)
+
+
+def _envelope_from_mcp_error(exc: Exception) -> dict[str, Any] | None:
+    """Extract the wire envelope from an MCP ToolError's JSON string."""
+    from fastmcp.exceptions import ToolError
+
+    if not isinstance(exc, ToolError):
+        return None
+    try:
+        envelope = json.loads(str(exc))
+        if isinstance(envelope, dict) and "errors" in envelope:
+            return envelope
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
 class Transport(StrEnum):
     """Dispatch transports for behavioral tests."""
 
@@ -91,8 +183,9 @@ class InvalidAuthHint(TypedDict):
 
     Names the two keys ONCE, so the producer (``uc002_create_media_buy``'s
     ``_dispatch_full_create``) and both REST consumers (``_run_rest_request`` in
-    ``_base``, ``RestE2EDispatcher`` in ``dispatchers``) are bound to one
-    declaration instead of re-spelling the string keys three times. ``tenant``
+    ``_base``; ``RestE2EDispatcher`` in ``dispatchers``, which forwards it to
+    ``client._deliver_e2e_rest``) are bound to one declaration instead of
+    re-spelling the string keys three times. ``tenant``
     carries the bare host-routed tenant id the whole non-disclosure contract
     turns on: a typo or a dropped key would otherwise be caught by nothing until
     the leg silently stopped reaching the redacted raise.
@@ -111,10 +204,11 @@ def _invalid_auth_headers(hint: InvalidAuthHint) -> dict[str, str]:
     """Realize the ``_invalid_auth`` hint as REST auth headers — one recipe, both legs.
 
     The in-process leg (``_run_rest_request``) and the e2e leg
-    (``RestE2EDispatcher``) send the identical pair. Hand-copying it per leg is
-    how the two silently diverge, and a divergence here does not fail loudly —
-    it false-floors the grade, because a leg that stops reaching the redacted
-    raise still reports no disclosure.
+    (``client._deliver_e2e_rest``, fed the hint by ``RestE2EDispatcher``) send
+    the identical pair. Hand-copying it per leg is how the two silently diverge,
+    and a divergence here does not fail loudly — it false-floors the grade,
+    because a leg that stops reaching the redacted raise still reports no
+    disclosure.
     """
     return {"x-adcp-auth": hint["token"], "x-adcp-tenant": hint["tenant"]}
 
@@ -138,6 +232,38 @@ def _discard_invalid_auth_hint(kwargs: dict[str, Any]) -> None:
     kwargs.pop("_invalid_auth", None)
 
 
+# The ONE identity-argument omission sentinel for the whole dispatch core
+# (tests/harness/client.py, dispatchers.py, _base.py, _mixins.py — plus
+# tests/helpers/mcp_envelope_capture.py, which carries the same distinction
+# outside tests/harness/). Distinguishes "the caller did not pass identity="
+# (fall back to whatever default THAT call site uses — env.identity_for(),
+# self.identity, delegate-by-omission, PrincipalFactory.make_identity(), ...)
+# from an EXPLICIT identity=None (deliberately unauthenticated dispatch).
+# Previously reimplemented as a private object() in seven different function
+# bodies plus two other module-level sentinels (client.py, mcp_envelope_
+# capture.py) — this is the one shared object identity every comparison uses;
+# each call site keeps its OWN fallback logic when it detects the sentinel,
+# never folded into this constant. Scoped to the identity-argument omission
+# disease specifically — other object()-as-sentinel uses in tests/harness/
+# for unrelated fields (e.g. media_buy_create.py's OMIT_IDEMPOTENCY_KEY) are
+# a different sentinel family and are not consolidated here.
+NO_IDENTITY_OVERRIDE = object()
+
+
+class MissingToolNameError(NotImplementedError):
+    """A legacy ``env.call_via(transport, **kwargs)`` E2E dispatch had no way to
+    derive the tool/skill name (no ``tool_name=`` kwarg, no per-env attribute
+    to introspect it from).
+
+    The ONE exception type for this failure mode, replacing what used to be a
+    per-dispatcher fork (``TypeError`` in one, ``NotImplementedError`` in the
+    other). Subclasses ``NotImplementedError`` deliberately: that is the one
+    exception ``AdCPTestClient.call()`` re-raises as a hard wiring failure
+    instead of downgrading into an error ``TransportResult`` — a missing tool
+    name is a harness bug, not a simulated AdCP rejection.
+    """
+
+
 @dataclass(frozen=True)
 class E2EConfig:
     """Configuration for E2E transport dispatch.
@@ -149,6 +275,74 @@ class E2EConfig:
 
     base_url: str
     postgres_url: str
+
+
+# Fields `_serialize_for_a2a` adds to an A2A artifact DataPart. They are
+# populated by the PROTOCOL layer (the pin's Protocol Envelope arm) and are not
+# declared on any Pydantic response model, so they must come off before a body
+# is validated — under extra="forbid" they are a hard ValidationError. The
+# captured `wire_response` keeps them: siblings assert on the full envelope.
+A2A_PROTOCOL_ENVELOPE_FIELDS = ("message", "success")
+
+
+def strip_a2a_protocol_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """A copy of *data* without the A2A protocol-envelope fields.
+
+    One definition, three call sites (``_run_a2a_handler``, the client's
+    ``_deliver_a2a``, and ``BaseTestEnv._deliver_via_client``). Each used to
+    spell the same two ``pop`` calls itself, so adding a third protocol field
+    would have needed finding all of them.
+    """
+    return {k: v for k, v in data.items() if k not in A2A_PROTOCOL_ENVELOPE_FIELDS}
+
+
+# The two values TransportResult.envelope["status"] may take. A DERIVED enum,
+# never a synthesized HTTP status_code: fabricating an integer for MCP/A2A would
+# turn today's silent no-op into a loud tautology — the harness asserting != 500
+# against a number the harness itself invented.
+DERIVED_STATUS_ADCP_ERROR = "adcp_error"
+DERIVED_STATUS_TRANSPORT_FAULT = "transport_fault"
+
+
+def derive_error_status(wire_error_envelope: dict[str, Any] | None) -> str:
+    """Did the seller answer with a structured AdCP envelope, or fault?
+
+    Reads each transport's OWN authentic evidence, because that is exactly what
+    ``wire_error_envelope`` is built from — REST's real HTTP body, A2A's failed
+    Task artifact DataPart, MCP's ToolError JSON. Recovering an envelope from any
+    of them means the seller produced a structured AdCP rejection; recovering
+    none means the request died as a transport fault before any envelope existed.
+
+    This is the signal the storyboard Then actually means by "not a 500 or
+    non-AdCP error shape", expressed so it grades on all three transports instead
+    of only the one that happens to carry an HTTP status.
+    """
+    return DERIVED_STATUS_ADCP_ERROR if wire_error_envelope else DERIVED_STATUS_TRANSPORT_FAULT
+
+
+@dataclass(frozen=True)
+class DeliverResult:
+    """What one transport delivery produced: the parsed payload AND its wire bytes.
+
+    The harness used to carry these on two different channels — the payload came
+    back as the return value of ``env.call_mcp``/``call_a2a``, while the wire was
+    stashed on ``env._last_wire_response`` and read back ACROSS the object
+    boundary by the dispatchers. Two channels for one delivery is what let a
+    second writer appear (six sites on BaseTestEnv, three more in client.py) and
+    what let the wire silently go stale, since nothing tied a stash to the call
+    that produced it.
+
+    One return value closes that structurally: there is no attribute for a second
+    writer to write. ``wire_response`` is None where no wire exists (IMPL) or
+    where the dispatch path does not observe one (the legacy
+    ``_run_mcp_wrapper``).
+
+    The #1858 round-2 remediation;
+    pinned by ``test_architecture_harness_single_dispatch``.
+    """
+
+    payload: Any
+    wire_response: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +402,29 @@ class TransportResult:
     @property
     def is_error(self) -> bool:
         return self.error is not None
+
+    def require_wire(self) -> dict[str, Any]:
+        """The success-path body the buyer actually received, or a loud failure.
+
+        The success-side counterpart of :meth:`assert_wire_error`, and for the same
+        reason: the guarded read belongs on the object that HOLDS the wire, so every
+        caller gets the same guard instead of re-deriving it. Three copies of this
+        check had grown across the suite, and a fourth partial one — each free to
+        drift, and each a place where a missing ``wire_response`` could fall through
+        to a harness-side reconstruction and assert nothing.
+
+        Two failures are distinguished because they mean different things: an error
+        result was never going to have a success body, while a success result with no
+        stashed body means the dispatch bypassed the real pipeline — the silent
+        tautology this guard exists to make loud.
+        """
+        assert self.is_success, f"expected a success wire body, got error {self.error!r}"
+        assert self.wire_response is not None, (
+            "no wire body was stashed for a successful call — the dispatch bypassed the "
+            "real pipeline, so any assertion on it would grade a harness reconstruction "
+            "rather than what the buyer received"
+        )
+        return self.wire_response
 
     def assert_wire_error(
         self,
