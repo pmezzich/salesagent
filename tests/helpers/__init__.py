@@ -88,6 +88,7 @@ from tests.helpers.idempotency_seeds import (
     seed_media_buy,
     seed_principal,
 )
+from tests.helpers.ledger import load_ledger_nodeids
 from tests.helpers.log_assertions import rendered_log_calls
 
 __all__ = [
@@ -98,6 +99,8 @@ __all__ = [
     "assert_no_raw_validation_leak",
     "assert_no_raw_exception_leak",
     "RAW_EXCEPTION_LEAK_SENTINEL",
+    # Known-failures ledger parsing
+    "load_ledger_nodeids",
     # Log-call assertions
     "rendered_log_calls",
     # Idempotency cache seeding
