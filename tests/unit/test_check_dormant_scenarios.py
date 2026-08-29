@@ -144,17 +144,40 @@ def _inline_collapse_lines(source: str, filename: str) -> list[int]:
 _CONFTEST = Path(__file__).resolve().parents[1] / "bdd" / "conftest.py"
 
 
+def _is_route_relay(node: ast.expr) -> bool:
+    """True for ``<something>.xfail_reason`` — a forward of an already-guarded row field."""
+    return isinstance(node, ast.Attribute) and node.attr == "xfail_reason"
+
+
 def _xfail_reason_nodes(scope: ast.AST) -> Iterator[ast.expr]:
     """Yield every xfail-reason expression in ``scope`` — the single owner of
     "what counts as an xfail-reason site" for both AST guards below.
 
-    A reason site is either the first positional argument of an imperative
-    ``pytest.xfail(...)`` / ``xfail(...)`` call, or the value assigned to
-    ``report.wasxfail``. ``pytest.mark.xfail(reason=...)`` markers are
-    deliberately NOT collected: they are the documented spec-production-gap
-    ledger, whose bespoke reasons classify as documented on purpose (their
-    ``func.value`` is an Attribute — ``pytest.mark`` — not a Name, which is
-    what the predicate keys on).
+    Three emitter shapes, because ``_harness_env`` has two of them since the
+    routing table replaced its ``elif`` chain:
+
+    * the first positional argument of an imperative ``pytest.xfail(...)`` /
+      ``xfail(...)`` call — now only the router's catch-all;
+    * the value assigned to ``report.wasxfail`` in the makereport hook;
+    * the ``xfail_reason=`` keyword of an ``EnvRoute(...)`` row, which
+      ``_run_env_route`` hands straight to ``pytest.xfail``. The per-UC reasons
+      that used to be inline ``pytest.xfail`` calls live here now, so a finder
+      that stopped at the first two shapes would go blind on seven reasons
+      while still passing — the false-green this whole check exists to kill.
+
+    ``pytest.mark.xfail(reason=...)`` markers are deliberately NOT collected:
+    they are the documented spec-production-gap ledger, whose bespoke reasons
+    classify as documented on purpose. The marker keyword is ``reason``, the
+    route field is ``xfail_reason``, so keying on the field name keeps the
+    ledger out of scope without needing to inspect the callee.
+
+    ``_run_env_route``'s ``pytest.xfail(route.xfail_reason)`` is a RELAY, not a
+    fourth site: it forwards a value already collected — and therefore already
+    held to the taxonomy — at the row that authored it. Collecting it too would
+    report the one generic consumer as an offender forever, since a forwarded
+    attribute can never name the taxonomy. The exemption cannot go vacuous:
+    ``test_finder_sees_every_emitter_kind`` pins that the ``xfail_reason=``
+    branch still reaches the rows this relay reads.
     """
     for node in ast.walk(scope):
         if isinstance(node, ast.Call):
@@ -162,8 +185,11 @@ def _xfail_reason_nodes(scope: ast.AST) -> Iterator[ast.expr]:
             is_imperative_xfail = (
                 isinstance(func, ast.Attribute) and func.attr == "xfail" and isinstance(func.value, ast.Name)
             ) or (isinstance(func, ast.Name) and func.id == "xfail")
-            if is_imperative_xfail and node.args:
+            if is_imperative_xfail and node.args and not _is_route_relay(node.args[0]):
                 yield node.args[0]
+            for kw in node.keywords:
+                if kw.arg == "xfail_reason":
+                    yield kw.value
         elif isinstance(node, ast.Assign):
             if any(isinstance(t, ast.Attribute) and t.attr == "wasxfail" for t in node.targets):
                 yield node.value
@@ -227,7 +253,7 @@ class TestClassify:
             xt.not_implemented("E2E_MCP dispatcher is not yet implemented"),
             xt.no_harness_wired("UC-026"),
             xt.not_yet_wired("UC-003", "for non-extension scenarios"),
-            xt.not_yet_wired("UC-011", "for markers: {'billing'}"),
+            xt.not_yet_wired("UC-011", "for these markers"),
         ],
         ids=["step-missing", "not-implemented", "no-harness", "uc003-unwired", "uc011-unwired"],
     )
@@ -488,22 +514,30 @@ class TestConftestEmittedReasonsAreTaxonomyDerived:
             return cls._references_taxonomy(reason)
         return False  # a bare Constant string, or anything with no taxonomy reference
 
-    def test_finder_sees_both_emitter_kinds(self):
-        """Anti-vacuity pin: the shared finder must reach BOTH emitter shapes.
+    def test_finder_sees_every_emitter_kind(self):
+        """Anti-vacuity pin: the shared finder must reach ALL THREE emitter shapes.
 
         If the ``report.wasxfail`` (Assign) branch of ``_xfail_reason_nodes``
         broke, the derivation test below would silently skip the makereport
         hook and pass on the ``pytest.xfail`` sites alone — re-opening the
-        exact gap this guard was widened to close. Same for the Call branch
-        and ``_harness_env``.
+        exact gap this guard was widened to close. Same for the Call branch and
+        the router catch-all in ``_harness_env``, and same for the
+        ``xfail_reason=`` branch and the ``ENV_ROUTES`` rows, which is where
+        every per-UC not-wired reason now lives.
         """
         tree = ast.parse(_CONFTEST.read_text(encoding="utf-8"))
         hook = next(
             n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "pytest_runtest_makereport"
         )
         env = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_harness_env")
+        routes = next(
+            n.value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == "ENV_ROUTES"
+        )
         assert sum(1 for _ in _xfail_reason_nodes(hook)) >= 3, "makereport wasxfail assignments not found"
         assert sum(1 for _ in _xfail_reason_nodes(env)) >= 1, "_harness_env pytest.xfail calls not found"
+        assert sum(1 for _ in _xfail_reason_nodes(routes)) >= 7, "ENV_ROUTES xfail_reason rows not found"
 
     def test_every_emitted_xfail_reason_is_taxonomy_derived(self):
         source = _CONFTEST.read_text(encoding="utf-8")
