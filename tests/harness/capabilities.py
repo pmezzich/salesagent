@@ -15,10 +15,11 @@ Transport coverage: A2A (``get_adcp_capabilities`` skill), MCP
 so this env derives the verb from the request: the parameterless discovery call
 GETs, a request carrying a body POSTs it. ``build_rest_body`` records whether a
 body was built and the ``REST_METHOD`` property reads that flag; the base
-``_run_rest_request`` and ``RestE2EDispatcher`` both honor it through the shared
-``rest_send`` helper, so the two dispatch paths share one source of truth for the
-verb (precedent: the ``REST_METHOD``/``REST_ENDPOINT`` properties on
-``media_buy_dual.py``).
+``_run_rest_request`` and ``RestE2EDispatcher`` both honor it, and both route the
+"does this verb carry ``json=``" decision through ``client.py``'s single
+``_rest_request_kwargs``/``_BODILESS_REST_VERBS`` home, so the two dispatch paths
+cannot disagree on the verb (precedent: the ``REST_METHOD``/``REST_ENDPOINT``
+properties on ``media_buy_dual.py``).
 
 Usage::
 
@@ -39,6 +40,11 @@ from tests.harness._base import IntegrationEnv
 
 class CapabilitiesEnv(IntegrationEnv):
     """Integration test environment for ``_get_adcp_capabilities_impl``."""
+
+    # Dispatch declaration: the base owns call_mcp/call_a2a.
+    MCP_TOOL = "get_adcp_capabilities"
+    A2A_SKILL = "get_adcp_capabilities"
+    RESPONSE_MODEL = GetAdcpCapabilitiesResponse
 
     EXTERNAL_PATCHES: dict[str, str] = {}
     REST_ENDPOINT = "/api/v1/capabilities"
@@ -81,19 +87,11 @@ class CapabilitiesEnv(IntegrationEnv):
         kwargs.setdefault("req", None)
         return _get_adcp_capabilities_impl(kwargs["req"], kwargs["identity"])
 
-    def call_a2a(self, **kwargs: Any) -> GetAdcpCapabilitiesResponse:
-        """Call the get_adcp_capabilities skill via the real AdCPRequestHandler."""
-        return self._run_a2a_handler("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
-
-    def call_mcp(self, **kwargs: Any) -> GetAdcpCapabilitiesResponse:
-        """Call the get_adcp_capabilities tool via Client(mcp) — full pipeline."""
-        return self._run_mcp_client("get_adcp_capabilities", GetAdcpCapabilitiesResponse, **kwargs)
-
     def build_rest_body(self, **kwargs: Any) -> dict[str, Any]:
         """Build the REST body and record whether the request carried params.
 
-        Capabilities discovery is parameterless today (``req=None`` → ``{}``), so
-        the recorded flag drives ``REST_METHOD`` to a bodyless GET. A future
+        Capabilities discovery is parameterless today (``req=None`` -> ``{}``), so
+        the recorded flag drives ``REST_METHOD`` to a bodiless GET. A future
         parameterized request (protocols filter, context echo, version) yields a
         non-empty body and POSTs it — the verb follows the request, not a
         hand-synced constant.
