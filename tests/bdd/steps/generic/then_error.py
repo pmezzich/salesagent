@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 
 from pytest_bdd import parsers, then
 
+from tests.bdd.steps._outcome_helpers import wire_error_envelope_or_none
+
 if TYPE_CHECKING:  # import-cycle-free: annotations are strings under PEP 563
     from tests.harness.transport import TransportResult
 
@@ -31,11 +33,14 @@ if TYPE_CHECKING:  # import-cycle-free: annotations are strings under PEP 563
 def _wire_result(ctx: dict) -> TransportResult:
     """Return the dispatched ``TransportResult`` for steps that delegate to its graders.
 
-    Companion to ``_wire_envelope``: steps that hand the whole grading job to a
-    harness grader (``assert_wire_error`` / ``assert_wire_recovery`` /
-    ``assert_wire_is_adcp_envelope``) need the result object, not the parsed
-    envelope. Raises a named AssertionError rather than a bare ``KeyError`` when
-    the When step never dispatched, so the failure says which step is missing.
+    Companion to ``wire_error_envelope_or_none``: steps that hand the whole
+    grading job to a harness grader (``assert_wire_error`` /
+    ``assert_wire_recovery`` / ``assert_wire_is_adcp_envelope``) need the result
+    object, not the parsed envelope. Raises a named AssertionError rather than a
+    bare ``KeyError`` when the When step never dispatched, so the failure says
+    which step is missing. Shared with the domain error-path step modules — the
+    one guarded read of ``ctx['result']``, so a missing dispatch reports the same
+    way everywhere.
     """
     result = ctx.get("result")
     assert result is not None, (
@@ -45,32 +50,21 @@ def _wire_result(ctx: dict) -> TransportResult:
     return result
 
 
-def _wire_envelope(ctx: dict) -> dict | None:
-    """Return the two-layer wire error envelope off the dispatched result, or ``None``.
-
-    The single reader of ``TransportResult.wire_error_envelope`` — every wire
-    accessor below (``_wire_code`` / ``_wire_suggestion`` / ``_wire_error_object``)
-    and the correlation-echo Then step derive from this one place, so the
-    envelope path is parsed exactly once. ``dispatch_request`` stores the
-    normalized ``TransportResult`` on ``ctx['result']`` and exposes the real
-    two-layer ``{adcp_error, errors[]}`` envelope on ``wire_error_envelope``
-    (REST/A2A/MCP). Returns ``None`` on IMPL / no-wire scenarios so callers can
-    fall back to the reconstructed ``ctx['error']`` (#1417).
-    """
-    result = ctx.get("result")
-    return getattr(result, "wire_error_envelope", None) if result is not None else None
-
-
 def _wire_code(ctx: dict) -> str | None:
     """Return the authoritative wire error code when a wire envelope was captured.
 
-    The wire code is the buyer-facing contract; prefer it over the lossy
-    reconstructed ``ctx['error']`` (which collapses distinct wire codes onto one
-    exception class — e.g. yields ``RuntimeError`` for an unmapped code). Returns
+    ``dispatch_request`` stores the normalized ``TransportResult`` on
+    ``ctx['result']`` and exposes the real two-layer envelope on
+    ``wire_error_envelope`` (REST/A2A/MCP), read through the single guarded
+    accessor ``wire_error_envelope_or_none`` (``_outcome_helpers.py`` — no
+    hand-rolled ``getattr``). The wire code is the
+    buyer-facing contract; prefer it over the lossy reconstructed
+    ``ctx['error']`` (which collapses distinct wire codes onto one exception
+    class — e.g. yields ``RuntimeError`` for an unmapped code). Returns
     ``None`` on IMPL / no-wire scenarios so callers fall back to the
     reconstructed exception (#1417).
     """
-    envelope = _wire_envelope(ctx)
+    envelope = wire_error_envelope_or_none(ctx)
     if not envelope:
         return None
     return (envelope.get("adcp_error") or {}).get("code")
@@ -81,18 +75,20 @@ def _wire_suggestion(ctx: dict) -> str | None:
 
     Mirrors ``_wire_code``: when the scenario dispatched through a wire transport
     (REST/A2A/MCP), the ``suggestion`` is the buyer-facing contract and must be
-    read from the real envelope, not the lossy reconstructed ``ctx['error']``.
-    STRICT error.json conformance: only the top-level ``suggestion`` on the
-    error object (``errors[0]`` or ``adcp_error`` layer) counts — a suggestion
-    buried in ``details`` is a conformance bug the harness surfaces, not masks
-    (#1417). Same canonical lookup as
+    read from the real envelope (via ``wire_error_envelope_or_none``, not a
+    hand-rolled ``getattr``), not the lossy reconstructed
+    ``ctx['error']``. STRICT error.json conformance: only the top-level
+    ``suggestion`` on the error object (``errors[0]`` or ``adcp_error`` layer)
+    counts — a suggestion buried in ``details`` is a conformance bug the
+    harness surfaces, not masks (#1417). Same canonical lookup as
     ``TransportResult.assert_wire_error``. Returns ``None`` on IMPL / no-wire
     scenarios so callers fall back to the reconstructed exception
     (#1417).
     """
     from tests.harness.transport import extract_wire_suggestion
 
-    return extract_wire_suggestion(_wire_envelope(ctx))
+    envelope = wire_error_envelope_or_none(ctx)
+    return extract_wire_suggestion(envelope)
 
 
 def _wire_error_object(ctx: dict) -> dict | None:
@@ -100,12 +96,14 @@ def _wire_error_object(ctx: dict) -> dict | None:
 
     Mirrors ``_wire_code`` / ``_wire_suggestion``: when the scenario dispatched
     through a wire transport (REST/A2A/MCP), field-presence checks must read the
-    real envelope's error object, not the lossy reconstructed ``ctx['error']``.
-    Prefers the ``errors[0]`` layer (per-error fields like ``field``) and falls
-    back to the envelope-level ``adcp_error``. Returns ``None`` on IMPL / no-wire
-    scenarios so callers fall back to the reconstructed exception (#1417).
+    real envelope's error object (via ``wire_error_envelope_or_none``, not a
+    hand-rolled ``getattr``), not the lossy reconstructed
+    ``ctx['error']``. Prefers the ``errors[0]`` layer (per-error fields like
+    ``field``) and falls back to the envelope-level ``adcp_error``. Returns
+    ``None`` on IMPL / no-wire scenarios so callers fall back to the
+    reconstructed exception (#1417).
     """
-    envelope = _wire_envelope(ctx)
+    envelope = wire_error_envelope_or_none(ctx)
     if not envelope:
         return None
     errors = envelope.get("errors") or []
@@ -419,12 +417,11 @@ def then_error_recovery(ctx: dict, recovery: str) -> None:
     ``assert_wire_error`` (the buyer-facing contract); IMPL/no-wire scenarios
     fall back to the reconstructed ``ctx['error']``.
     """
-    result = ctx.get("result")
-    envelope = getattr(result, "wire_error_envelope", None) if result is not None else None
+    envelope = wire_error_envelope_or_none(ctx)
     if envelope is not None:
         wire_code = _wire_code(ctx)
         assert wire_code, f"Expected wire error code when asserting recovery={recovery!r}: {envelope}"
-        result.assert_wire_error(wire_code, recovery=recovery)
+        ctx["result"].assert_wire_error(wire_code, recovery=recovery)
         return
     error = ctx.get("error")
     assert error is not None, "No error recorded in ctx"
@@ -434,46 +431,6 @@ def then_error_recovery(ctx: dict, recovery: str) -> None:
         assert error.recovery == recovery, f"Expected recovery '{recovery}', got '{error.recovery}'"
     else:
         raise AssertionError(f"Cannot check recovery on non-AdCPError: {type(error).__name__}")
-
-
-@then("the error recovery hint should indicate correctable")
-def then_error_recovery_correctable(ctx: dict) -> None:
-    """Assert recovery=correctable on the wire error envelope.
-
-    Routes through the code-free harness grader ``assert_wire_recovery``, which
-    owns the envelope-presence guard and the two-layer read. ``correctable`` is
-    the only expectation crossing the boundary, so it is the value actually
-    under test; the scenario's separate ``the error code should be "X"`` step
-    pins the code on the wire (#1417).
-    """
-    _wire_result(ctx).assert_wire_recovery("correctable")
-
-
-@then("the response should echo the context.correlation_id unchanged")
-def then_error_echoes_correlation_id(ctx: dict) -> None:
-    """Assert the wire envelope echoes the request's context.correlation_id."""
-    sent = ctx.get("sent_correlation_id")
-    assert sent, "When step did not record ctx['sent_correlation_id'] — cannot verify echo"
-    envelope = _wire_envelope(ctx)
-    assert envelope is not None, f"No wire error envelope captured — error: {ctx.get('error')!r}"
-    context = envelope.get("context")
-    echoed = context.get("correlation_id") if isinstance(context, dict) else None
-    assert echoed == sent, f"Expected correlation_id '{sent}' echoed unchanged, got '{echoed}'"
-
-
-@then("the response should NOT be a 500 or non-AdCP error shape")
-def then_error_is_structured_adcp_shape(ctx: dict) -> None:
-    """Assert the failure surfaced as the AdCP two-layer envelope, not a 500.
-
-    Routes through the code-free harness grader ``assert_wire_is_adcp_envelope``,
-    which grades the two-layer shape and checks the envelope's recovery against
-    the PINNED enum's classification for its code — non-vacuous: a 500 /
-    non-AdCP body has no ``wire_error_envelope`` and fails, layers that disagree
-    fail, a non-canonical code fails, and a recovery that drifts from the spec
-    classification fails. The scenario's separate ``the error code should be
-    "X"`` step pins the code itself (#1417), so the code is not graded here.
-    """
-    _wire_result(ctx).assert_wire_is_adcp_envelope()
 
 
 @then('the error should include a "suggestion" field')

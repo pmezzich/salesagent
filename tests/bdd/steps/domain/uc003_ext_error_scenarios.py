@@ -3,7 +3,6 @@
 Given steps set up error conditions (missing auth, wrong principal, bad budget,
 invalid creatives, etc.). Then steps assert error fields (recovery, suggestion).
 
-beads: salesagent-05b
 """
 
 from __future__ import annotations
@@ -74,11 +73,11 @@ def given_buyer_authenticated_as(ctx: dict, principal_id: str) -> None:
     identity post-condition to the shared ``authenticate_env_as`` helper; adds only
     the use-case-specific ``has_auth`` flag.
 
-    NOTE: this module is currently dormant (see ``steps/generic/_auth.py``) — it is
-    not registered in ``tests/bdd/conftest.py`` ``pytest_plugins`` and UC-003 is not
-    wired into the BDD harness, so these steps do not execute (UC-003 update
-    scenarios auto-xfail). Kept on the shared helper so it is correct when UC-003 is
-    activated.
+    NOTE: this module IS registered in ``tests/bdd/conftest.py`` ``pytest_plugins``
+    (conftest.py:63), so this registration is global — it is the definition every
+    feature gets for this sentence, not a dormant one. (A previous version of this
+    note claimed the opposite; UC-003's own update scenarios auto-xfail, which is a
+    separate fact and was mistaken for the step being unreachable.)
     """
     authenticate_env_as(ctx, principal_id)
     ctx["has_auth"] = True
@@ -902,7 +901,7 @@ def given_seller_minimum_budget(ctx: dict, amount: int, currency: str) -> None:
     This step stores the expected values in ctx so downstream Then steps
     can assert on error details shape when the gap is closed.
 
-    FIXME(salesagent-9vgz.1): Wire seller minimum budget to production
+    FIXME: Wire seller minimum budget to production
     validation and error details.
     """
     import pytest
@@ -912,7 +911,7 @@ def given_seller_minimum_budget(ctx: dict, amount: int, currency: str) -> None:
     pytest.xfail(
         f"SPEC-PRODUCTION GAP: Seller minimum budget ({amount} {currency}) "
         "not carried in production. v3.1 BUDGET_TOO_LOW error details "
-        "(minimum_budget, currency) not populated. FIXME(salesagent-9vgz.1)"
+        "(minimum_budget, currency) not populated. FIXME"
     )
 
 
@@ -941,25 +940,16 @@ def then_suggestion_contains_either(ctx: dict, text1: str, text2: str) -> None:
 # ═══════════════════════════════════════════════════════════════════════
 # Storyboard v3.1: structured lookup errors (invalid_transitions)
 # ═══════════════════════════════════════════════════════════════════════
+#
+# Scope: the Phase 3 (unknown_package) arms only. Phase 1
+# (T-UC-003-storyboard-media-buy-not-found) and Phase 4
+# (T-UC-003-storyboard-not-cancellable-on-recancel) are owned by
+# tests/bdd/steps/domain/uc003_storyboard_generic_client.py, which dispatches
+# them through AdCPTestClient on BareIntegrationEnv; their Given/When steps are
+# NOT redefined here (two modules binding one step string is ambiguous, and the
+# routing row for those tags is `uc003-storyboard-generic-client`).
 
 _STORYBOARD_CORRELATION_ID = "corr-uc003-invalid-transitions"
-
-
-@given("the buyer fabricates a media_buy_id that does not exist in the seller catalog")
-def given_fabricated_media_buy_id(ctx: dict) -> None:
-    """Point the update at a media_buy_id absent from the seller catalog.
-
-    Delegates the absence guarantee to the canonical, tenant-scoped
-    ``given_no_media_buy_by_id`` (:120) — which deletes any stray row within
-    the tenant — instead of re-inlining a non-scoped, assert-only check that
-    has already drifted from it. Mirrors how the package sibling
-    ``given_unrelated_package_reference`` delegates to
-    ``given_package_not_in_media_buy``.
-    """
-    kwargs = _ensure_update_defaults(ctx)
-    fabricated = "mb_fabricated_unknown"
-    given_no_media_buy_by_id(ctx, fabricated)
-    kwargs["media_buy_id"] = fabricated
 
 
 @given("the media buy exists in the seller catalog")
@@ -993,18 +983,18 @@ def _send_storyboard_update(ctx: dict, extra: dict[str, Any] | None = None) -> N
     (adcp==6.6.0, canonical per docs/adcp-spec-version.md) —
     invalid_transitions.yaml (``path: context.correlation_id``, "returned
     unchanged").
+
+    Stashes under the generic ``ctx["correlation_id"]`` key — the contract
+    ``then_response_echoes_correlation_id_unchanged``
+    (``uc003_storyboard_generic_client.py``) reads — so the shared correlation-echo
+    Then step grades these scenarios unmodified, whichever dispatch path they take.
     """
     kwargs = _ensure_update_defaults(ctx)
     if extra:
         kwargs.update(extra)
     kwargs["context"] = {"correlation_id": _STORYBOARD_CORRELATION_ID}
-    ctx["sent_correlation_id"] = _STORYBOARD_CORRELATION_ID
+    ctx["correlation_id"] = _STORYBOARD_CORRELATION_ID
     when_send_update_request(ctx)
-
-
-@when("the Buyer Agent sends update_media_buy with the unknown media_buy_id and paused true")
-def when_update_unknown_media_buy_paused(ctx: dict) -> None:
-    _send_storyboard_update(ctx, {"paused": True})
 
 
 @when("the Buyer Agent sends update_media_buy targeting the unknown package")
