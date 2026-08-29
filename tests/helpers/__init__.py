@@ -83,6 +83,8 @@ from tests.helpers.idempotency_seeds import (
     seed_media_buy,
     seed_principal,
 )
+from tests.helpers.ledger import load_ledger_nodeids
+from tests.helpers.log_assertions import rendered_log_calls
 
 __all__ = [
     # Auth helpers
@@ -90,6 +92,10 @@ __all__ = [
     # Envelope assertions
     "assert_envelope_shape",
     "assert_no_raw_validation_leak",
+    # Known-failures ledger parsing
+    "load_ledger_nodeids",
+    # Log-call assertions
+    "rendered_log_calls",
     # Idempotency cache seeding
     "make_active_cached_success",
     "seed_cached_success",
