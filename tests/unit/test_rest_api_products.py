@@ -9,8 +9,6 @@ Validates the first REST transport for get_products:
 
 MCP-side schema grading for get_products lives in tests/unit/test_mcp_tool_schemas.py,
 not here.
-
-beads: salesagent-b61l.13
 """
 
 from unittest.mock import patch
